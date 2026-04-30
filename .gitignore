@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode / Swift local state
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Build artifacts
+build/
+dist/
+*.app
+*.dmg
+
+# Logs
+*.log
