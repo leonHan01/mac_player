@@ -748,7 +748,7 @@ final class PlayerWindow: NSWindow {
             case 124:
                 seekForwardAction()
                 return
-            case 51, 117:
+            case 117:
                 deleteAction()
                 return
             default:
@@ -760,7 +760,7 @@ final class PlayerWindow: NSWindow {
     }
 
     override func keyDown(with event: NSEvent) {
-        let deleteKeyCodes: Set<UInt16> = [51, 117]
+        let deleteKeyCodes: Set<UInt16> = [117]
         if deleteKeyCodes.contains(event.keyCode) {
             deleteAction()
             return
