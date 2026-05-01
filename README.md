@@ -7,7 +7,7 @@ A small macOS video player for local video files.
 - Open local MP4, MOV, and M4V files.
 - Open a folder and play supported videos in filename order.
 - Control playback from the bottom bar: previous, play/pause, next, playback mode, timeline, and volume.
-- Add local tags to videos for categorization.
+- Add local tags to videos for categorization and filter folder playback by tag.
 - Move the current video to the Trash with Delete after confirmation.
 - Drag a video file into the window to play it.
 - Native macOS playback controls through AVKit.
@@ -48,6 +48,6 @@ Press the Right Arrow key to jump forward 5 seconds, or the Left Arrow key to ju
 
 Use the `Order` / `Shuffle` button to switch between sequential playback and random playback. In shuffle mode, automatic next and the Next button pick a random different video; Previous returns through the shuffle history.
 
-Choose `File > Edit Tags...` or press Command-T to edit tags for the current video. Tags are saved locally in `~/Library/Application Support/MacVideoPlayer/tags.json` and the original video file is not modified.
+Use the tag bar below the video to see the current video's tags, add an existing tag, create a new tag, or filter the current folder playback by tag. Choose `File > Edit Tags...` or press Command-T to edit the full tag list for the current video. Tags are saved locally in `~/Library/Application Support/MacVideoPlayer/tags.json` and the original video file is not modified.
 
 Press Delete or choose `File > Delete Current Video` to move the current video to the Trash. The app asks for confirmation before deleting.

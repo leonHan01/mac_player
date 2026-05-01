@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let playerWindow = PlayerWindow(
             playerController: playerController,
+            tagStore: tagStore,
             openFileAction: { [weak self] in
                 self?.openDocument(nil)
             },
@@ -119,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             try tagStore.setTags(parseTags(input.stringValue), for: url)
+            playerController.refreshCurrentItem()
         } catch {
             showTagError(error)
         }
@@ -294,11 +296,13 @@ final class PlayerController: NSObject {
     var onItemChanged: (() -> Void)?
     var onPlaybackModeChanged: (() -> Void)?
 
+    private var sourcePlaylist: [URL] = []
     private var playlist: [URL] = []
     private var currentIndex = 0
     private var playbackHistory: [Int] = []
 
     private(set) var playbackMode: PlaybackMode = .sequential
+    private(set) var activeTagFilter: String?
 
     var hasPrevious: Bool {
         switch playbackMode {
@@ -324,6 +328,10 @@ final class PlayerController: NSObject {
         }
 
         return playlist[currentIndex]
+    }
+
+    var playlistScopeURLs: [URL] {
+        sourcePlaylist
     }
 
     func load(url: URL) throws {
@@ -367,8 +375,10 @@ final class PlayerController: NSObject {
             try validateFile(url: url)
         }
 
+        sourcePlaylist = urls
         playlist = urls
         currentIndex = 0
+        activeTagFilter = nil
         playbackHistory.removeAll()
         play(url: first)
     }
@@ -415,6 +425,33 @@ final class PlayerController: NSObject {
         onItemChanged?()
     }
 
+    func applyTagFilter(_ tag: String?, tagStore: TagStore) throws {
+        activeTagFilter = tag
+        let filteredPlaylist: [URL]
+
+        if let tag {
+            filteredPlaylist = sourcePlaylist.filter { url in
+                tagStore.tags(for: url).contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+            }
+        } else {
+            filteredPlaylist = sourcePlaylist
+        }
+
+        guard !filteredPlaylist.isEmpty else {
+            throw OpenVideoError.noPlayableFiles(tag.map { "tag \($0)" } ?? "(empty selection)")
+        }
+
+        let previousURL = currentVideoURL
+        playlist = filteredPlaylist
+        currentIndex = previousURL.flatMap { filteredPlaylist.firstIndex(of: $0) } ?? 0
+        playbackHistory.removeAll()
+        play(url: playlist[currentIndex])
+    }
+
+    func refreshCurrentItem() {
+        onItemChanged?()
+    }
+
     func seek(by seconds: Double) {
         guard let item = player.currentItem else { return }
 
@@ -442,6 +479,7 @@ final class PlayerController: NSObject {
         var trashedURL: NSURL?
         try FileManager.default.trashItem(at: url, resultingItemURL: &trashedURL)
 
+        sourcePlaylist.removeAll { $0 == url }
         playlist.remove(at: currentIndex)
         playbackHistory = playbackHistory.compactMap { index in
             if index == currentIndex {
@@ -574,6 +612,21 @@ final class TagStore {
         try save()
     }
 
+    func addTag(_ tag: String, for url: URL) throws {
+        var tags = tags(for: url)
+        tags.append(tag)
+        try setTags(tags, for: url)
+    }
+
+    func allTags(for urls: [URL]? = nil) -> [String] {
+        let selectedKeys = urls.map { Set($0.map(key(for:))) }
+        let tags = tagsByPath
+            .filter { key, _ in selectedKeys?.contains(key) ?? true }
+            .flatMap(\.value)
+
+        return normalize(tags)
+    }
+
     private func load() throws {
         guard FileManager.default.fileExists(atPath: storeURL.path) else {
             tagsByPath = [:]
@@ -644,6 +697,7 @@ final class PlayerWindow: NSWindow {
 
     init(
         playerController: PlayerController,
+        tagStore: TagStore,
         openFileAction: @escaping () -> Void,
         openFolderAction: @escaping () -> Void,
         previousAction: @escaping () -> Void,
@@ -667,9 +721,10 @@ final class PlayerWindow: NSWindow {
         )
 
         title = "Mac Video Player"
-        minSize = NSSize(width: 520, height: 320)
+        minSize = NSSize(width: 900, height: 360)
         contentView = PlayerView(
             playerController: playerController,
+            tagStore: tagStore,
             openFileAction: openFileAction,
             openFolderAction: openFolderAction,
             previousAction: previousAction,
@@ -719,6 +774,14 @@ final class PlayerWindow: NSWindow {
 final class PlayerView: NSView {
     private let playerView = AVPlayerView()
     private let emptyContainer = NSStackView()
+    private let tagBar = NSView()
+    private let tagContainer = NSStackView()
+    private let currentTagsLabel = NSTextField(labelWithString: "Tags: None")
+    private let existingTagPopup = NSPopUpButton()
+    private let newTagField = NSTextField()
+    private let addTagButton = NSButton(title: "Add", target: nil, action: nil)
+    private let tagSeparator = NSBox()
+    private let tagFilterPopup = NSPopUpButton()
     private let controlBar = NSView()
     private let navigationContainer = NSStackView()
     private let previousButton = NSButton()
@@ -734,6 +797,7 @@ final class PlayerView: NSView {
     private let openButton = NSButton(title: "Open Video...", target: nil, action: nil)
     private let openFolderButton = NSButton(title: "Open Folder...", target: nil, action: nil)
     private let playerController: PlayerController
+    private let tagStore: TagStore
     private let openFileAction: () -> Void
     private let openFolderAction: () -> Void
     private let previousAction: () -> Void
@@ -743,12 +807,14 @@ final class PlayerView: NSView {
 
     init(
         playerController: PlayerController,
+        tagStore: TagStore,
         openFileAction: @escaping () -> Void,
         openFolderAction: @escaping () -> Void,
         previousAction: @escaping () -> Void,
         nextAction: @escaping () -> Void
     ) {
         self.playerController = playerController
+        self.tagStore = tagStore
         self.openFileAction = openFileAction
         self.openFolderAction = openFolderAction
         self.previousAction = previousAction
@@ -762,6 +828,41 @@ final class PlayerView: NSView {
         playerView.controlsStyle = .none
         playerView.videoGravity = .resizeAspect
         playerView.translatesAutoresizingMaskIntoConstraints = false
+
+        currentTagsLabel.textColor = .secondaryLabelColor
+        currentTagsLabel.lineBreakMode = .byTruncatingTail
+        currentTagsLabel.maximumNumberOfLines = 1
+
+        existingTagPopup.target = self
+        existingTagPopup.action = #selector(existingTagSelected(_:))
+
+        newTagField.placeholderString = "New tag"
+        newTagField.target = self
+        newTagField.action = #selector(addTagButtonPressed(_:))
+
+        addTagButton.bezelStyle = .rounded
+        addTagButton.target = self
+        addTagButton.action = #selector(addTagButtonPressed(_:))
+
+        tagFilterPopup.target = self
+        tagFilterPopup.action = #selector(tagFilterChanged(_:))
+
+        tagContainer.orientation = .horizontal
+        tagContainer.alignment = .centerY
+        tagContainer.spacing = 8
+        tagContainer.translatesAutoresizingMaskIntoConstraints = false
+        tagContainer.addArrangedSubview(currentTagsLabel)
+        tagContainer.addArrangedSubview(existingTagPopup)
+        tagContainer.addArrangedSubview(newTagField)
+        tagContainer.addArrangedSubview(addTagButton)
+        tagSeparator.boxType = .separator
+        tagContainer.addArrangedSubview(tagSeparator)
+        tagContainer.addArrangedSubview(tagFilterPopup)
+
+        tagBar.wantsLayer = true
+        tagBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        tagBar.translatesAutoresizingMaskIntoConstraints = false
+        tagBar.addSubview(tagContainer)
 
         emptyState.textColor = .secondaryLabelColor
         emptyState.alignment = .center
@@ -859,6 +960,7 @@ final class PlayerView: NSView {
         emptyContainer.addArrangedSubview(openFolderButton)
 
         addSubview(playerView)
+        addSubview(tagBar)
         addSubview(controlBar)
         addSubview(emptyContainer)
 
@@ -866,7 +968,21 @@ final class PlayerView: NSView {
             playerView.leadingAnchor.constraint(equalTo: leadingAnchor),
             playerView.trailingAnchor.constraint(equalTo: trailingAnchor),
             playerView.topAnchor.constraint(equalTo: topAnchor),
-            playerView.bottomAnchor.constraint(equalTo: controlBar.topAnchor),
+            playerView.bottomAnchor.constraint(equalTo: tagBar.topAnchor),
+
+            tagBar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            tagBar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            tagBar.bottomAnchor.constraint(equalTo: controlBar.topAnchor),
+            tagBar.heightAnchor.constraint(equalToConstant: 44),
+
+            tagContainer.leadingAnchor.constraint(equalTo: tagBar.leadingAnchor, constant: 12),
+            tagContainer.trailingAnchor.constraint(lessThanOrEqualTo: tagBar.trailingAnchor, constant: -12),
+            tagContainer.centerYAnchor.constraint(equalTo: tagBar.centerYAnchor),
+            currentTagsLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            currentTagsLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
+            existingTagPopup.widthAnchor.constraint(equalToConstant: 150),
+            newTagField.widthAnchor.constraint(equalToConstant: 130),
+            tagFilterPopup.widthAnchor.constraint(equalToConstant: 170),
 
             controlBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             controlBar.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -901,12 +1017,14 @@ final class PlayerView: NSView {
         playerController.onItemChanged = { [weak self] in
             self?.updateEmptyState()
             self?.updateProgress()
+            self?.updateTagControls()
         }
         playerController.onPlaybackModeChanged = { [weak self] in
             self?.updatePlaybackModeButton()
         }
         installTimeObserver()
         updateEmptyState()
+        updateTagControls()
     }
 
     required init?(coder: NSCoder) {
@@ -940,6 +1058,56 @@ final class PlayerView: NSView {
 
     @objc private func playbackModeButtonPressed(_ sender: NSButton) {
         playerController.togglePlaybackMode()
+    }
+
+    @objc private func existingTagSelected(_ sender: NSPopUpButton) {
+        guard
+            sender.indexOfSelectedItem > 0,
+            let tag = sender.selectedItem?.title,
+            let url = playerController.currentVideoURL
+        else {
+            return
+        }
+
+        do {
+            try tagStore.addTag(tag, for: url)
+            playerController.refreshCurrentItem()
+        } catch {
+            presentTagError(error)
+        }
+    }
+
+    @objc private func addTagButtonPressed(_ sender: Any?) {
+        guard let url = playerController.currentVideoURL else {
+            NSSound.beep()
+            return
+        }
+
+        let tag = newTagField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tag.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        do {
+            try tagStore.addTag(tag, for: url)
+            newTagField.stringValue = ""
+            playerController.refreshCurrentItem()
+        } catch {
+            presentTagError(error)
+        }
+    }
+
+    @objc private func tagFilterChanged(_ sender: NSPopUpButton) {
+        let selectedIndex = sender.indexOfSelectedItem
+        let selectedTag = selectedIndex <= 0 ? nil : sender.selectedItem?.title
+
+        do {
+            try playerController.applyTagFilter(selectedTag, tagStore: tagStore)
+        } catch {
+            presentTagError(error)
+            sender.selectItem(at: 0)
+        }
     }
 
     @objc private func progressSliderChanged(_ sender: NSSlider) {
@@ -989,6 +1157,7 @@ final class PlayerView: NSView {
     private func updateEmptyState() {
         let hasItem = playerController.player.currentItem != nil
         emptyContainer.isHidden = hasItem
+        tagBar.isHidden = !hasItem
         controlBar.isHidden = !hasItem
         previousButton.isEnabled = playerController.hasPrevious
         playPauseButton.isEnabled = hasItem
@@ -1000,6 +1169,50 @@ final class PlayerView: NSView {
         updatePlayPauseButton()
         updatePlaybackModeButton()
         updateVolumeControls()
+    }
+
+    private func updateTagControls() {
+        guard let url = playerController.currentVideoURL else {
+            currentTagsLabel.stringValue = "Tags: None"
+            existingTagPopup.removeAllItems()
+            existingTagPopup.addItem(withTitle: "Add Existing")
+            tagFilterPopup.removeAllItems()
+            tagFilterPopup.addItem(withTitle: "All Videos")
+            return
+        }
+
+        let currentTags = tagStore.tags(for: url)
+        currentTagsLabel.stringValue = currentTags.isEmpty ? "Tags: None" : "Tags: \(currentTags.joined(separator: ", "))"
+
+        let availableTags = tagStore.allTags(for: playerController.playlistScopeURLs)
+        existingTagPopup.removeAllItems()
+        existingTagPopup.addItem(withTitle: "Add Existing")
+        for tag in availableTags where !currentTags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
+            existingTagPopup.addItem(withTitle: tag)
+        }
+        existingTagPopup.selectItem(at: 0)
+
+        tagFilterPopup.removeAllItems()
+        tagFilterPopup.addItem(withTitle: "All Videos")
+        for tag in availableTags {
+            tagFilterPopup.addItem(withTitle: tag)
+        }
+
+        if let activeTagFilter = playerController.activeTagFilter,
+           let index = tagFilterPopup.itemTitles.firstIndex(where: { $0.caseInsensitiveCompare(activeTagFilter) == .orderedSame }) {
+            tagFilterPopup.selectItem(at: index)
+        } else {
+            tagFilterPopup.selectItem(at: 0)
+        }
+    }
+
+    private func presentTagError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Cannot Update Tags"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func installTimeObserver() {
