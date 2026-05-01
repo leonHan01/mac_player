@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: PlayerWindow?
     private let playerController = PlayerController()
+    private let tagStore = TagStore()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -96,6 +97,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         playerController.togglePlaybackMode()
     }
 
+    @objc private func editTags(_ sender: Any?) {
+        guard let url = playerController.currentVideoURL else {
+            NSSound.beep()
+            return
+        }
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        input.placeholderString = "favorite, work, review"
+        input.stringValue = tagStore.tags(for: url).joined(separator: ", ")
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Edit Tags"
+        alert.informativeText = "Separate tags for \(url.lastPathComponent) with commas."
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try tagStore.setTags(parseTags(input.stringValue), for: url)
+        } catch {
+            showTagError(error)
+        }
+    }
+
     @objc private func closeWindow(_ sender: Any?) {
         window?.performClose(sender)
     }
@@ -166,6 +194,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
+    private func showTagError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Cannot Save Tags"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func parseTags(_ text: String) -> [String] {
+        var seen = Set<String>()
+        return text
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { tag in
+                let key = tag.lowercased()
+                if seen.contains(key) {
+                    return false
+                }
+
+                seen.insert(key)
+                return true
+            }
+    }
+
     private func makeMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
@@ -215,6 +269,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             withTitle: "Toggle Shuffle",
             action: #selector(togglePlaybackMode(_:)),
             keyEquivalent: ""
+        ).target = self
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(
+            withTitle: "Edit Tags...",
+            action: #selector(editTags(_:)),
+            keyEquivalent: "t"
         ).target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(
@@ -473,6 +533,84 @@ enum PlaybackMode {
     case shuffle
 }
 
+final class TagStore {
+    private var tagsByPath: [String: [String]] = [:]
+    private let storeURL: URL
+
+    init() {
+        let supportURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+
+        let directoryURL = supportURL.appendingPathComponent("MacVideoPlayer", isDirectory: true)
+        storeURL = directoryURL.appendingPathComponent("tags.json")
+
+        do {
+            try FileManager.default.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+            try load()
+        } catch {
+            tagsByPath = [:]
+        }
+    }
+
+    func tags(for url: URL) -> [String] {
+        tagsByPath[key(for: url)] ?? []
+    }
+
+    func setTags(_ tags: [String], for url: URL) throws {
+        let normalizedTags = normalize(tags)
+        let key = key(for: url)
+
+        if normalizedTags.isEmpty {
+            tagsByPath.removeValue(forKey: key)
+        } else {
+            tagsByPath[key] = normalizedTags
+        }
+
+        try save()
+    }
+
+    private func load() throws {
+        guard FileManager.default.fileExists(atPath: storeURL.path) else {
+            tagsByPath = [:]
+            return
+        }
+
+        let data = try Data(contentsOf: storeURL)
+        tagsByPath = try JSONDecoder().decode([String: [String]].self, from: data)
+    }
+
+    private func save() throws {
+        let data = try JSONEncoder().encode(tagsByPath)
+        try data.write(to: storeURL, options: [.atomic])
+    }
+
+    private func normalize(_ tags: [String]) -> [String] {
+        var seen = Set<String>()
+        return tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { tag in
+                let key = tag.lowercased()
+                if seen.contains(key) {
+                    return false
+                }
+
+                seen.insert(key)
+                return true
+            }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func key(for url: URL) -> String {
+        url.standardizedFileURL.path
+    }
+}
+
 enum OpenVideoError: LocalizedError {
     case notLocalFile
     case unsupportedExtension(String)
@@ -550,10 +688,10 @@ final class PlayerWindow: NSWindow {
                 nextAction()
                 return
             case 123:
-                seekForwardAction()
+                seekBackwardAction()
                 return
             case 124:
-                seekBackwardAction()
+                seekForwardAction()
                 return
             case 51, 117:
                 deleteAction()
