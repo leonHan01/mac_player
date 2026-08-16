@@ -1,6 +1,6 @@
 # Mac Video Player
 
-> A lightweight macOS video player for local media files, with folder playlists, tagging, shuffle playback, and GPU-accelerated rendering through IINA/libmpv.
+> A lightweight native macOS video player for watching and organizing local videos with playlists, tags, shuffle playback, and GPU-accelerated IINA/libmpv rendering.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 

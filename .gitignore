@@ -1,21 +1,47 @@
-# macOS
+# macOS metadata
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
 
 # Swift Package Manager
 .build/
 .swiftpm/
 Package.resolved
 
-# Xcode / Swift local state
+# Xcode and local IDE state
 DerivedData/
-*.xcuserstate
 xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
 
-# Build artifacts
+# Build artifacts and packaged releases
 build/
 dist/
 *.app
 *.dmg
+*.zip
+*.tar.gz
+*.dSYM/
 
-# Logs
+# Test and compiler output
+coverage/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+# Logs and crash reports
 *.log
+*.crash
+
+# Editor and operating-system temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment and secret files
+.env
+.env.*
+!.env.example
