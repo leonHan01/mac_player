@@ -45,6 +45,12 @@ private struct MPVOpenGLFBO {
 
 private let MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: Int32 = 12
 
+private struct MPVPropertyEvent {
+    var name: UnsafePointer<CChar>?
+    var format: Int32
+    var data: UnsafeMutableRawPointer?
+}
+
 private struct MPVEvent {
     var eventID: Int32
     var error: Int32
@@ -80,6 +86,31 @@ private typealias MPVGetOpenGLProcAddress = @convention(c) (
 private typealias MPVWakeupCallback = @convention(c) (UnsafeMutableRawPointer?) -> Void
 private typealias MPVRenderUpdateCallback = @convention(c) (UnsafeMutableRawPointer?) -> Void
 
+/// libmpv may issue more than one render update before AppKit has processed
+/// the first display request. Keep at most one request queued on the main
+/// thread so decoding cannot build up an unbounded backlog of no-op redraws.
+final class MPVFrameRequestCoordinator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasPendingRequest = false
+
+    func beginRequest() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !hasPendingRequest else { return false }
+        hasPendingRequest = true
+        return true
+    }
+
+    func finishRequest() {
+        lock.lock()
+        hasPendingRequest = false
+        lock.unlock()
+    }
+}
+
+private let mpvFrameRequestCoordinator = MPVFrameRequestCoordinator()
+
 private final class MPVRuntime {
     typealias Create = @convention(c) () -> OpaquePointer?
     typealias Initialize = @convention(c) (OpaquePointer?) -> Int32
@@ -89,13 +120,8 @@ private final class MPVRuntime {
         UnsafePointer<CChar>?,
         UnsafePointer<CChar>?
     ) -> Int32
-    typealias Command = @convention(c) (OpaquePointer?, UnsafePointer<UnsafePointer<CChar>?>?) -> Int32
-    typealias GetProperty = @convention(c) (
-        OpaquePointer?,
-        UnsafePointer<CChar>?,
-        Int32,
-        UnsafeMutableRawPointer?
-    ) -> Int32
+    typealias CommandAsync = @convention(c) (OpaquePointer?, UInt64, UnsafePointer<UnsafePointer<CChar>?>?) -> Int32
+    typealias ObserveProperty = @convention(c) (OpaquePointer?, UInt64, UnsafePointer<CChar>?, Int32) -> Int32
     typealias SetWakeupCallback = @convention(c) (
         OpaquePointer?,
         MPVWakeupCallback?,
@@ -120,8 +146,8 @@ private final class MPVRuntime {
     let initialize: Initialize
     let destroy: Destroy
     let setOptionString: SetOptionString
-    let command: Command
-    let getProperty: GetProperty
+    let commandAsync: CommandAsync
+    let observeProperty: ObserveProperty
     let setWakeupCallback: SetWakeupCallback
     let waitEvent: WaitEvent
     let renderContextCreate: RenderContextCreate
@@ -129,12 +155,10 @@ private final class MPVRuntime {
     let renderContextSetUpdateCallback: RenderContextSetUpdateCallback
     let renderContextRender: RenderContextRender
 
-    init() throws {
-        guard let frameworksURL = Bundle.main.privateFrameworksURL else {
+    init(libraryURL customLibraryURL: URL? = nil) throws {
+        guard let libraryURL = customLibraryURL ?? Bundle.main.privateFrameworksURL?.appendingPathComponent("libmpv.2.dylib") else {
             throw MPVPlaybackError.runtimeMissing
         }
-
-        let libraryURL = frameworksURL.appendingPathComponent("libmpv.2.dylib")
         guard FileManager.default.isReadableFile(atPath: libraryURL.path) else {
             throw MPVPlaybackError.runtimeMissing
         }
@@ -150,8 +174,8 @@ private final class MPVRuntime {
             initialize = try MPVRuntime.symbol("mpv_initialize", from: handle)
             destroy = try MPVRuntime.symbol("mpv_destroy", from: handle)
             setOptionString = try MPVRuntime.symbol("mpv_set_option_string", from: handle)
-            command = try MPVRuntime.symbol("mpv_command", from: handle)
-            getProperty = try MPVRuntime.symbol("mpv_get_property", from: handle)
+            commandAsync = try MPVRuntime.symbol("mpv_command_async", from: handle)
+            observeProperty = try MPVRuntime.symbol("mpv_observe_property", from: handle)
             setWakeupCallback = try MPVRuntime.symbol("mpv_set_wakeup_callback", from: handle)
             waitEvent = try MPVRuntime.symbol("mpv_wait_event", from: handle)
             renderContextCreate = try MPVRuntime.symbol("mpv_render_context_create", from: handle)
@@ -184,13 +208,20 @@ final class MPVPlayback: NSObject {
     var onEnded: (() -> Void)?
     var onFailed: ((URL, Error) -> Void)?
 
+    private let libraryURL: URL?
+    private let screenshotDirectory: URL?
+    private var commandQueue: MPVCommandQueue?
+    private var requestedLoad: PendingMPVLoad?
+    private var cachedTime = 0.0
+    private var cachedDuration = 0.0
+    private var cachedPaused = true
+    private var pendingScreenshots = Set<URL>()
     private var runtime: MPVRuntime?
     private var player: OpaquePointer?
     private var renderContext: OpaquePointer?
     private weak var videoView: MPVVideoView?
     private var progressTimer: Timer?
     private var endWasReported = false
-    private var isStopping = false
     private var hasLoadedMedia = false
     private var nextLoadGeneration: UInt64 = 0
     private var pendingLoad: PendingMPVLoad?
@@ -198,29 +229,18 @@ final class MPVPlayback: NSObject {
     private var desiredVolume = 1.0
     private var desiredMuted = false
 
-    var isActive: Bool {
-        hasLoadedMedia
+    init(libraryURL: URL? = nil, screenshotDirectory: URL? = nil) {
+        self.libraryURL = libraryURL
+        self.screenshotDirectory = screenshotDirectory
+        super.init()
     }
 
-    var isPlaying: Bool {
-        !boolProperty("pause", fallback: true)
-    }
-
-    var currentTime: Double {
-        doubleProperty("time-pos", fallback: 0)
-    }
-
-    var duration: Double {
-        doubleProperty("duration", fallback: 0)
-    }
-
-    var volume: Double {
-        min(max(doubleProperty("volume", fallback: desiredVolume * 100) / 100, 0), 1)
-    }
-
-    var isMuted: Bool {
-        boolProperty("mute", fallback: desiredMuted)
-    }
+    var isActive: Bool { hasLoadedMedia }
+    var isPlaying: Bool { hasLoadedMedia && !cachedPaused }
+    var currentTime: Double { cachedTime }
+    var duration: Double { cachedDuration }
+    var volume: Double { desiredVolume }
+    var isMuted: Bool { desiredMuted }
 
     /// Prepare libmpv before the first file is selected. This avoids decoder
     /// and shader startup work being visible as the first-open delay.
@@ -235,67 +255,96 @@ final class MPVPlayback: NSObject {
     func start(url: URL, in videoView: MPVVideoView) throws {
         try ensurePlayer()
         try videoView.attach(playback: self)
-
         self.videoView = videoView
-        stopCurrentLoad()
-        endWasReported = false
-        setVolume(desiredVolume)
-        setMuted(desiredMuted)
+        try loadMedia(url: url)
+    }
 
+    /// The load lifecycle is independent of the video surface, allowing event
+    /// sequences to be checked without creating a window or decoding a video.
+    func loadMedia(url: URL) throws {
+        try ensurePlayer()
         nextLoadGeneration &+= 1
-        pendingLoad = PendingMPVLoad(generation: nextLoadGeneration, url: url)
-        let result = sendCommand(["loadfile", url.path, "replace"])
-        guard result >= 0 else {
-            pendingLoad = nil
-            throw MPVPlaybackError.initializationFailed("IINA/libmpv could not open this video file (error \(result)).")
-        }
+        requestedLoad = PendingMPVLoad(generation: nextLoadGeneration, url: url)
+        activeLoad = nil
         hasLoadedMedia = true
-        _ = sendCommand(["set", "pause", "no"])
-
+        endWasReported = false
+        cachedTime = 0
+        cachedDuration = 0
+        cachedPaused = false
         startProgressTimer()
+        scheduleRequestedLoad()
         onStateChanged?()
     }
 
+    private func scheduleRequestedLoad() {
+        // A command reply may precede START_FILE. Do not replace another file
+        // until its entry ID is known, or a late event could be bound to a new URL.
+        guard pendingLoad == nil, let load = requestedLoad else { return }
+        guard activeLoad?.generation != load.generation else { return }
+        pendingLoad = load
+        sendCommand(["loadfile", load.url.path, "replace"]) { [weak self] result in
+            guard let self, result < 0 else { return }
+            if self.pendingLoad?.generation == load.generation { self.pendingLoad = nil }
+            if self.requestedLoad?.generation == load.generation {
+                self.clearLoadedMedia()
+                self.onStateChanged?()
+                self.onFailed?(load.url, MPVPlaybackError.initializationFailed(
+                    "IINA/libmpv could not open this video file (error \(result))."
+                ))
+            } else {
+                self.scheduleRequestedLoad()
+            }
+        }
+        setVolume(desiredVolume)
+        setMuted(desiredMuted)
+        sendCommand(["set", "pause", "no"])
+    }
+
     func play() {
-        _ = sendCommand(["set", "pause", "no"])
+        cachedPaused = false
+        sendCommand(["set", "pause", "no"])
         onStateChanged?()
     }
 
     func pause() {
-        _ = sendCommand(["set", "pause", "yes"])
+        cachedPaused = true
+        sendCommand(["set", "pause", "yes"])
         onStateChanged?()
     }
 
     func seek(to seconds: Double) {
-        _ = sendCommand(["seek", String(max(0, seconds)), "absolute+exact"])
-        onStateChanged?()
+        guard seconds.isFinite else { return }
+        sendCommand(["seek", String(max(0, seconds)), "absolute+exact"])
     }
 
     func setVolume(_ volume: Double) {
         desiredVolume = min(max(volume, 0), 1)
-        _ = sendCommand(["set", "volume", String(desiredVolume * 100)])
+        sendCommand(["set", "volume", String(desiredVolume * 100)])
     }
 
     func setMuted(_ muted: Bool) {
         desiredMuted = muted
-        _ = sendCommand(["set", "mute", muted ? "yes" : "no"])
+        sendCommand(["set", "mute", muted ? "yes" : "no"])
     }
 
-    /// Captures the current decoded frame through libmpv. This command does not
-    /// alter the pause state, so playback continues while the PNG is written.
-    func captureScreenshot() throws -> URL {
-        guard hasLoadedMedia else {
-            throw MPVPlaybackError.noActiveVideo
-        }
-
+    /// Only report success after mpv has finished writing the frame. Reserving
+    /// the filename also keeps simultaneous screenshot requests distinct.
+    func captureScreenshot() async throws -> URL {
+        guard hasLoadedMedia else { throw MPVPlaybackError.noActiveVideo }
         let outputURL = try nextScreenshotURL()
-        let result = sendCommand(["screenshot-to-file", outputURL.path, "subtitles"])
-        guard result >= 0 else {
-            throw MPVPlaybackError.screenshotFailed(
-                "IINA/libmpv could not capture a screenshot (error \(result))."
-            )
+        pendingScreenshots.insert(outputURL)
+        defer { pendingScreenshots.remove(outputURL) }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendCommand(["screenshot-to-file", outputURL.path, "subtitles"]) { result in
+                if result < 0 {
+                    continuation.resume(throwing: MPVPlaybackError.screenshotFailed(
+                        "IINA/libmpv could not capture a screenshot (error \(result))."
+                    ))
+                } else {
+                    continuation.resume()
+                }
+            }
         }
-
         return outputURL
     }
 
@@ -358,10 +407,17 @@ final class MPVPlayback: NSObject {
     func shutdown() {
         progressTimer?.invalidate()
         progressTimer = nil
+        requestedLoad = nil
         pendingLoad = nil
         activeLoad = nil
         hasLoadedMedia = false
         endWasReported = false
+        cachedPaused = true
+        cachedTime = 0
+        cachedDuration = 0
+        let queue = commandQueue
+        commandQueue = nil
+        queue?.cancelAll()
 
         guard let runtime, let player else {
             releaseRenderContext()
@@ -374,7 +430,6 @@ final class MPVPlayback: NSObject {
             runtime.renderContextSetUpdateCallback(renderContext, nil, nil)
         }
         runtime.setWakeupCallback(player, nil, nil)
-        _ = sendCommand(["stop"])
         releaseRenderContext()
         runtime.destroy(player)
         self.player = nil
@@ -417,7 +472,7 @@ final class MPVPlayback: NSObject {
     private func ensurePlayer() throws {
         guard player == nil else { return }
 
-        let runtime = try runtime ?? MPVRuntime()
+        let runtime = try runtime ?? MPVRuntime(libraryURL: libraryURL)
         self.runtime = runtime
         guard let player = runtime.create() else {
             throw MPVPlaybackError.initializationFailed("IINA/libmpv could not create a playback engine.")
@@ -451,11 +506,41 @@ final class MPVPlayback: NSObject {
             throw MPVPlaybackError.initializationFailed("IINA/libmpv could not initialize (error \(result)).")
         }
 
+        let properties: [(String, Int32)] = [("time-pos", 5), ("duration", 5), ("pause", 3), ("volume", 5), ("mute", 3)]
+        for (index, property) in properties.enumerated() {
+            let result = property.0.withCString { runtime.observeProperty(player, UInt64(index + 1), $0, property.1) }
+            guard result >= 0 else {
+                runtime.destroy(player)
+                throw MPVPlaybackError.initializationFailed("IINA/libmpv could not observe \(property.0) (error \(result)).")
+            }
+        }
         self.player = player
+        commandQueue = MPVCommandQueue { [weak self] arguments, id in
+            self?.submitCommand(arguments, id: id) ?? -1
+        }
         runtime.setWakeupCallback(player, mpvWakeupCallback, Unmanaged.passUnretained(self).toOpaque())
     }
 
-    private func sendCommand(_ arguments: [String]) -> Int32 {
+    private func sendCommand(_ arguments: [String], completion: @escaping (Int32) -> Void = { _ in }) {
+        guard let commandQueue else {
+            completion(-1)
+            return
+        }
+        // Slider drags retain the latest target instead of accumulating work
+        // behind a slow command.
+        let key: String?
+        if arguments.first == "seek" {
+            key = "seek"
+        } else if arguments.count > 1, arguments[0] == "set",
+                  ["pause", "volume", "mute"].contains(arguments[1]) {
+            key = "set-" + arguments[1]
+        } else {
+            key = nil
+        }
+        commandQueue.enqueue(arguments, coalescingKey: key, completion: completion)
+    }
+
+    private func submitCommand(_ arguments: [String], id: UInt64) -> Int32 {
         guard let runtime, let player else { return -1 }
 
         let mutablePointers = arguments.map { argument in
@@ -466,14 +551,14 @@ final class MPVPlayback: NSObject {
             pointer.map { UnsafePointer<CChar>($0) }
         }
         pointers.append(nil)
-        return pointers.withUnsafeBufferPointer { runtime.command(player, $0.baseAddress) }
+        return pointers.withUnsafeBufferPointer { runtime.commandAsync(player, id, $0.baseAddress) }
     }
 
     private func nextScreenshotURL() throws -> URL {
         let fileManager = FileManager.default
         let picturesDirectory = fileManager.urls(for: .picturesDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
-        let directory = picturesDirectory
+        let directory = screenshotDirectory ?? picturesDirectory
             .appendingPathComponent("Mac Video Player", isDirectory: true)
             .appendingPathComponent("Screenshots", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -487,34 +572,43 @@ final class MPVPlayback: NSObject {
         while true {
             let suffix = duplicateIndex == 0 ? "" : " \(duplicateIndex + 1)"
             let url = directory.appendingPathComponent("Mac Video Player \(timestamp)\(suffix).png")
-            if !fileManager.fileExists(atPath: url.path) {
+            if !pendingScreenshots.contains(url), !fileManager.fileExists(atPath: url.path) {
                 return url
             }
             duplicateIndex += 1
         }
     }
 
-    private func doubleProperty(_ name: String, fallback: Double) -> Double {
-        guard let runtime, let player else { return fallback }
-        var value = fallback
-        let result = name.withCString { pointer in
-            runtime.getProperty(player, pointer, 5, &value)
+    private func handleProperty(_ property: MPVPropertyEvent) {
+        guard let name = property.name else { return }
+        switch String(cString: name) {
+        case "time-pos", "duration":
+            guard hasLoadedMedia, activeLoad?.generation == requestedLoad?.generation else { return }
+            let number = property.format == 5 ? property.data?.load(as: Double.self) : nil
+            let value = number.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 0
+            if String(cString: name) == "time-pos" { cachedTime = value } else { cachedDuration = value }
+        case "pause":
+            guard property.format == 3, let data = property.data else { return }
+            cachedPaused = data.load(as: Int32.self) != 0
+            onStateChanged?()
+        case "volume":
+            guard property.format == 5, let data = property.data else { return }
+            let value = data.load(as: Double.self)
+            guard value.isFinite else { return }
+            desiredVolume = min(max(value / 100, 0), 1)
+            onStateChanged?()
+        case "mute":
+            guard property.format == 3, let data = property.data else { return }
+            desiredMuted = data.load(as: Int32.self) != 0
+            onStateChanged?()
+        default:
+            break
         }
-        return result >= 0 && value.isFinite ? value : fallback
-    }
-
-    private func boolProperty(_ name: String, fallback: Bool) -> Bool {
-        guard let runtime, let player else { return fallback }
-        var value: Int32 = fallback ? 1 : 0
-        let result = name.withCString { pointer in
-            runtime.getProperty(player, pointer, 3, &value)
-        }
-        return result >= 0 ? value != 0 : fallback
     }
 
     private func startProgressTimer() {
         progressTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollPlaybackState()
             }
@@ -527,17 +621,23 @@ final class MPVPlayback: NSObject {
         onProgressUpdated?()
     }
 
-    private func stopCurrentLoad() {
-        isStopping = true
-        progressTimer?.invalidate()
-        progressTimer = nil
-        pendingLoad = nil
+    private func clearLoadedMedia() {
+        requestedLoad = nil
         activeLoad = nil
         hasLoadedMedia = false
-        _ = sendCommand(["stop"])
-        drainEvents()
-        isStopping = false
+        cachedPaused = true
+        cachedTime = 0
+        cachedDuration = 0
+        progressTimer?.invalidate()
+        progressTimer = nil
+    }
+
+    private func stopCurrentLoad() {
+        clearLoadedMedia()
         endWasReported = false
+        // If a load is awaiting START_FILE, stop it once its entry is known.
+        // Keep the pending identity so its late events cannot claim a new load.
+        if pendingLoad == nil { sendCommand(["stop"]) }
     }
 
     private func releaseRenderContext() {
@@ -563,41 +663,46 @@ final class MPVPlayback: NSObject {
             guard event.pointee.eventID != 0 else { break }
 
             switch event.pointee.eventID {
+            case 5: // MPV_EVENT_COMMAND_REPLY
+                commandQueue?.receiveReply(id: event.pointee.replyUserdata, error: event.pointee.error)
             case 6:
                 guard let startFile = event.pointee.data?
                     .assumingMemoryBound(to: MPVStartFileEvent.self).pointee,
-                      let pendingLoad
-                else {
-                    continue
+                      let pendingLoad else { continue }
+                if requestedLoad?.generation == pendingLoad.generation {
+                    activeLoad = MPVLoadIdentity(
+                        generation: pendingLoad.generation,
+                        playlistEntryID: startFile.playlistEntryID,
+                        url: pendingLoad.url
+                    )
                 }
-                activeLoad = MPVLoadIdentity(
-                    generation: pendingLoad.generation,
-                    playlistEntryID: startFile.playlistEntryID,
-                    url: pendingLoad.url
-                )
                 self.pendingLoad = nil
+                if requestedLoad == nil {
+                    sendCommand(["stop"])
+                } else {
+                    scheduleRequestedLoad()
+                }
             case 7:
                 guard let endFile = event.pointee.data?
                     .assumingMemoryBound(to: MPVEndFileEvent.self).pointee,
                       let activeLoad,
-                      Self.shouldHandle(endFile: endFile, for: activeLoad, isStopping: isStopping)
-                else {
-                    continue
-                }
-
+                      Self.shouldHandle(endFile: endFile, for: activeLoad, isStopping: !hasLoadedMedia)
+                else { continue }
                 if endFile.reason == 0, !endWasReported {
                     endWasReported = true
-                    progressTimer?.invalidate()
-                    progressTimer = nil
+                    clearLoadedMedia()
+                    onStateChanged?()
                     onEnded?()
                 } else if endFile.reason == 4 {
-                    hasLoadedMedia = false
-                    self.activeLoad = nil
-                    progressTimer?.invalidate()
-                    progressTimer = nil
+                    clearLoadedMedia()
+                    onStateChanged?()
                     onFailed?(activeLoad.url, MPVPlaybackError.initializationFailed(
                         "IINA/libmpv could not decode this video (error \(endFile.error))."
                     ))
+                }
+            case 22: // MPV_EVENT_PROPERTY_CHANGE
+                if let property = event.pointee.data?.assumingMemoryBound(to: MPVPropertyEvent.self).pointee {
+                    handleProperty(property)
                 }
             default:
                 continue
@@ -682,8 +787,11 @@ private func mpvWakeupCallback(_ context: UnsafeMutableRawPointer?) {
 private func mpvRenderUpdateCallback(_ context: UnsafeMutableRawPointer?) {
     guard let context else { return }
     let videoView = Unmanaged<MPVVideoView>.fromOpaque(context).takeUnretainedValue()
+    guard mpvFrameRequestCoordinator.beginRequest() else { return }
+
     DispatchQueue.main.async {
         videoView.requestFrame()
+        mpvFrameRequestCoordinator.finishRequest()
     }
 }
 

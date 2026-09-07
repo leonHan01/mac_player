@@ -7,6 +7,7 @@ DISPLAY_NAME="Mac Video Player"
 APP_DIR="$ROOT_DIR/build/$APP_NAME.app"
 VERSION="${APP_VERSION:-1.0}"
 DMG_PATH="$ROOT_DIR/build/$APP_NAME-$VERSION.dmg"
+mkdir -p "$ROOT_DIR/build"
 STAGING_DIR="$(mktemp -d "$ROOT_DIR/build/dmg-staging.XXXXXX")"
 
 cleanup() {

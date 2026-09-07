@@ -4,6 +4,12 @@ struct PlaylistLoadResult: Sendable {
     let requestedURL: URL
     let urls: [URL]
     let startURL: URL
+    let startsAtFirstVideo: Bool
+    let fileSizes: [URL: Int64]
+}
+
+private struct VideoFileScan {
+    let urls: [URL]
     let fileSizes: [URL: Int64]
 }
 
@@ -14,34 +20,39 @@ enum VideoFileScanner {
                 throw OpenVideoError.fileNotReadable
             }
 
-            let videoURLs = try videoFiles(in: url, sortMode: sortMode)
-            guard let first = videoURLs.first else {
+            let scan = try videoFiles(in: url, sortMode: sortMode)
+            guard let first = scan.urls.first else {
                 throw OpenVideoError.noPlayableFiles(url.lastPathComponent)
             }
 
             return PlaylistLoadResult(
                 requestedURL: url,
-                urls: videoURLs,
+                urls: scan.urls,
                 startURL: first,
-                fileSizes: fileSizes(for: videoURLs)
+                startsAtFirstVideo: true,
+                fileSizes: scan.fileSizes
             )
         }
 
         try validateFile(url: url)
 
         let directoryURL = url.deletingLastPathComponent()
-        var videoURLs = try videoFiles(in: directoryURL, sortMode: sortMode)
+        let scan = try videoFiles(in: directoryURL, sortMode: sortMode)
+        var videoURLs = scan.urls
+        var fileSizes = scan.fileSizes
 
         if !videoURLs.contains(where: { isSameFile($0, url) }) {
             videoURLs.append(url)
-            videoURLs = sorted(videoURLs, sortMode: sortMode)
+            fileSizes[url] = fileSize(url)
+            videoURLs = sorted(videoURLs, sortMode: sortMode, fileSizes: fileSizes)
         }
 
         return PlaylistLoadResult(
             requestedURL: url,
             urls: videoURLs,
             startURL: url,
-            fileSizes: fileSizes(for: videoURLs)
+            startsAtFirstVideo: false,
+            fileSizes: fileSizes
         )
     }
 
@@ -92,14 +103,19 @@ enum VideoFileScanner {
         }
     }
 
-    private static func videoFiles(in directoryURL: URL, sortMode: SortMode) throws -> [URL] {
+    private static func videoFiles(in directoryURL: URL, sortMode: SortMode) throws -> VideoFileScan {
         let urls = try FileManager.default.contentsOfDirectory(
             at: directoryURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey],
             options: [.skipsHiddenFiles]
         )
 
-        return sorted(urls.filter(isPlayableFileCandidate), sortMode: sortMode)
+        let candidates = urls.compactMap(playableFileCandidate)
+        let fileSizes = Dictionary(uniqueKeysWithValues: candidates.map { ($0.url, $0.fileSize) })
+        return VideoFileScan(
+            urls: sorted(candidates.map(\.url), sortMode: sortMode, fileSizes: fileSizes),
+            fileSizes: fileSizes
+        )
     }
 
     private static func isDirectory(_ url: URL) throws -> Bool {
@@ -111,11 +127,18 @@ enum VideoFileScanner {
         return values.isDirectory == true
     }
 
-    private static func isPlayableFileCandidate(_ url: URL) -> Bool {
-        guard isSupportedVideoFile(url) else { return false }
+    private static func playableFileCandidate(_ url: URL) -> (url: URL, fileSize: Int64)? {
+        guard isSupportedVideoFile(url) else { return nil }
 
-        let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
-        return values?.isRegularFile == true && FileManager.default.isReadableFile(atPath: url.path)
+        let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey]
+        )
+        guard values?.isRegularFile == true, FileManager.default.isReadableFile(atPath: url.path) else {
+            return nil
+        }
+
+        let fileSize = Int64(values?.fileSize ?? values?.totalFileAllocatedSize ?? 0)
+        return (url, fileSize)
     }
 
     private static func isSupportedVideoFile(_ url: URL) -> Bool {
@@ -127,7 +150,4 @@ enum VideoFileScanner {
         return Int64(values?.fileSize ?? values?.totalFileAllocatedSize ?? 0)
     }
 
-    private static func fileSizes(for urls: [URL]) -> [URL: Int64] {
-        Dictionary(uniqueKeysWithValues: urls.map { ($0, fileSize($0)) })
-    }
 }

@@ -75,6 +75,14 @@ Run the test suite with:
 swift test
 ```
 
+If the toolchain has no XCTest (for example, Command Line Tools without Xcode), run the core regression checks with Python 3:
+
+```sh
+python3 scripts/test-regressions.py
+```
+
+These checks use temporary fixtures and a fake libmpv client. They cover tag storage, playlist filtering and sorting, playback events, asynchronous commands, screenshots, and clean DMG staging without opening a player window or decoding media. Real playback and DMG creation still require separate integration checks.
+
 ## Playback and controls
 
 - `File > Open...` opens a video and scans its folder for supported videos.

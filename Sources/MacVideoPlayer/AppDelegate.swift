@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window = playerWindow
 
         NSApp.activate(ignoringOtherApps: true)
+        if let error = tagStore.loadError {
+            DispatchQueue.main.async { [weak self] in self?.showTagError(error) }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.playerController.warmUpMPVPlayback()
         }
@@ -117,10 +120,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func captureScreenshot(_ sender: Any?) {
-        do {
-            try playerController.captureScreenshot()
-        } catch {
-            showScreenshotError(error)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await playerController.captureScreenshot()
+            } catch {
+                showScreenshotError(error)
+            }
         }
     }
 
@@ -192,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             do {
                 try self.tagStore.setTags(tags, for: url)
-                self.playerController.refreshCurrentItem()
+                try self.playerController.refreshAfterTagMutation(tagStore: self.tagStore)
             } catch {
                 self.showTagError(error)
             }
@@ -294,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showTagError(_ error: Error) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Cannot Save Tags"
+        alert.messageText = "Cannot Access Tags"
         alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: "OK")
         alert.runModal()

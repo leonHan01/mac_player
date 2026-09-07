@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class TagInputTests: XCTestCase {
     func testTagInputFieldIsEditable() {
-        let field = NSTextField()
+        let field = NSComboBox()
         field.isEditable = false
 
         PlayerView.configureTagInputField(field)

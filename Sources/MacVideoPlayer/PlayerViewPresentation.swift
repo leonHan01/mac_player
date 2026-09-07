@@ -3,47 +3,43 @@ import AVKit
 
 extension PlayerView {
     internal func restorePlaybackShortcutFocus() {
-        DispatchQueue.main.async { [weak self] in
-            guard
-                let self,
-                self.playerController.hasActivePlayback,
-                let window = self.window
-            else {
-                return
-            }
+        guard playerController.hasActivePlayback, let window else { return }
 
-            let firstResponder = window.firstResponder
-            let tagFieldEditor = self.newTagField.currentEditor()
-            guard firstResponder === self.newTagField || firstResponder === tagFieldEditor else {
-                return
-            }
-
-            window.makeFirstResponder(nil)
+        let firstResponder = window.firstResponder
+        let tagFieldEditor = newTagField.currentEditor()
+        guard firstResponder === newTagField || firstResponder === tagFieldEditor else {
+            return
         }
+
+        // Restore shortcuts only after an explicit submission, before the user
+        // can begin another edit; playback notifications must never steal focus.
+        window.makeFirstResponder(nil)
     }
 
     internal func updateEmptyState() {
         let hasItem = playerController.hasActivePlayback
         let hasPlaylist = playerController.hasPlaylist
         let isLoading = playerController.isLoading
-        let playlistCount = playerController.playlistURLs.count
         updateWindowTitle()
-        emptyTitleLabel.stringValue = isLoading ? "Loading your library" : "Your private cinema"
+        updateLibraryLayout(hasPlaylist: hasPlaylist)
+        updateCanvasAppearance(hasItem: hasItem)
+        playerView.isHidden = !hasItem || !mpvPlayerView.isHidden
+        emptyTitleLabel.stringValue = isLoading ? "Loading your library" : hasPlaylist ? "Ready when you are" : "Open a video"
+        emptyTitleLabel.font = .systemFont(ofSize: hasPlaylist ? 22 : 28, weight: .medium)
         emptyIconView.image = NSImage(
-            systemSymbolName: isLoading ? "arrow.triangle.2.circlepath" : "play.square.stack.fill",
+            systemSymbolName: isLoading ? "arrow.triangle.2.circlepath" : "play.rectangle.on.rectangle",
             accessibilityDescription: nil
         )
-        titleSubtitleLabel.stringValue = hasItem
-            ? String(playlistCount) + (playlistCount == 1 ? " VIDEO · NOW PLAYING" : " VIDEOS · NOW PLAYING")
-            : hasPlaylist
-                ? String(playlistCount) + (playlistCount == 1 ? " VIDEO · READY TO RETRY" : " VIDEOS · READY TO RETRY")
-                : "LOCAL PLAYBACK"
+        titleSubtitleLabel.stringValue = isLoading
+            ? playerController.loadingMessage
+            : playerController.currentVideoURL?.lastPathComponent ?? "Your local video library"
         emptyState.stringValue = isLoading
             ? playerController.loadingMessage
-            : "Drop a video here, or choose a file or folder to begin."
+            : hasPlaylist ? "Choose a video from your playlist, or open another file." : "Drop a video here, or open a file or folder to get started."
         emptyContainer.isHidden = hasItem && !isLoading
-        openButton.isHidden = isLoading
-        openFolderButton.isHidden = isLoading
+        emptyActions.isHidden = isLoading
+        emptyIconView.isHidden = hasPlaylist
+        emptyHintLabel.isHidden = hasPlaylist || isLoading
         tagBar.isHidden = !hasPlaylist
         playlistPanel.isHidden = !hasPlaylist
         controlBar.isHidden = !hasPlaylist
@@ -59,6 +55,21 @@ extension PlayerView {
         updatePlaybackModeButton()
         updateSortModeButton()
         updateVolumeControls()
+    }
+
+    private func updateCanvasAppearance(hasItem: Bool) {
+        guard renderedCanvasHasItem != hasItem else { return }
+        renderedCanvasHasItem = hasItem
+        playerSurface.layer?.backgroundColor = (hasItem ? AppTheme.videoBackground : AppTheme.panelBackground).cgColor
+        playerSurface.layer?.borderColor = (hasItem ? AppTheme.canvasBorder : AppTheme.border).cgColor
+        emptyTitleLabel.textColor = hasItem ? .white : AppTheme.text
+        emptyState.textColor = hasItem ? AppTheme.videoSecondaryText : AppTheme.secondaryText
+        emptyHintLabel.textColor = hasItem ? AppTheme.videoSecondaryText : AppTheme.secondaryText
+        emptyIconView.contentTintColor = hasItem ? AppTheme.videoSecondaryText : AppTheme.primaryBlue
+        openFolderButton.layer?.backgroundColor = (hasItem ? AppTheme.videoHighlight : AppTheme.barBackground).cgColor
+        openFolderButton.layer?.borderColor = (hasItem ? AppTheme.canvasBorder : AppTheme.border).cgColor
+        openFolderButton.contentTintColor = hasItem ? .white : AppTheme.text
+        setButtonTitleColor(openFolderButton, color: hasItem ? .white : AppTheme.text)
     }
 
     internal func updatePlaylist() {
@@ -234,39 +245,62 @@ extension PlayerView {
 
     internal func updateProgress() {
         guard playerController.hasActivePlayback else {
-            currentTimeLabel.stringValue = "0:00"
-            durationLabel.stringValue = "0:00"
-            progressSlider.minValue = 0
-            progressSlider.maxValue = 1
-            progressSlider.doubleValue = 0
+            setProgressDisplay(currentTime: "0:00", duration: "0:00", maximum: 1, value: 0)
             return
         }
 
         let currentSeconds = playerController.playbackCurrentTime
         let durationSeconds = playerController.playbackDuration
 
-        currentTimeLabel.stringValue = formatTime(currentSeconds)
-        durationLabel.stringValue = formatTime(durationSeconds)
-
         guard durationSeconds.isFinite, durationSeconds > 0 else {
-            progressSlider.minValue = 0
-            progressSlider.maxValue = 1
-            progressSlider.doubleValue = 0
+            setProgressDisplay(
+                currentTime: formatTime(currentSeconds),
+                duration: formatTime(durationSeconds),
+                maximum: 1,
+                value: 0
+            )
             return
         }
 
-        progressSlider.minValue = 0
-        progressSlider.maxValue = durationSeconds
-        if !isSeeking {
-            progressSlider.doubleValue = min(max(currentSeconds, 0), durationSeconds)
+        setProgressDisplay(
+            currentTime: formatTime(currentSeconds),
+            duration: formatTime(durationSeconds),
+            maximum: durationSeconds,
+            value: min(max(currentSeconds, 0), durationSeconds)
+        )
+    }
+
+    private func setProgressDisplay(currentTime: String, duration: String, maximum: Double, value: Double) {
+        if currentTimeLabel.stringValue != currentTime {
+            currentTimeLabel.stringValue = currentTime
+        }
+
+        if durationLabel.stringValue != duration {
+            durationLabel.stringValue = duration
+        }
+
+        if progressSlider.minValue != 0 {
+            progressSlider.minValue = 0
+        }
+
+        if progressSlider.maxValue != maximum {
+            progressSlider.maxValue = maximum
+        }
+
+        if !isSeeking, progressSlider.doubleValue != value {
+            progressSlider.doubleValue = value
         }
     }
 
     internal func updatePlayPauseButton() {
         let isPlaying = playerController.isPlaying
+        guard renderedPlaybackState != isPlaying else { return }
+
+        renderedPlaybackState = isPlaying
         playPauseButton.title = ""
         playPauseButton.contentTintColor = .white
-        playPauseButton.layer?.backgroundColor = AppTheme.primaryBlue.cgColor
+        playPauseButton.layer?.backgroundColor = AppTheme.accentFill.cgColor
+        playPauseButton.setAccessibilityLabel(isPlaying ? "Pause" : "Play")
         playPauseButton.image = NSImage(
             systemSymbolName: isPlaying ? "pause.fill" : "play.fill",
             accessibilityDescription: isPlaying ? "Pause" : "Play"
@@ -299,12 +333,12 @@ extension PlayerView {
     internal func updateSortModeButton() {
         switch playerController.sortMode {
         case .nameAscending:
-            sortModeButton.title = "Sort: Name"
-            setButtonTitleColor(sortModeButton, color: AppTheme.primaryBlue)
+            sortModeButton.title = "Name"
+            setButtonTitleColor(sortModeButton, color: AppTheme.text)
             sortModeButton.toolTip = "Sort by filename"
         case .sizeDescending:
-            sortModeButton.title = "Sort: Size"
-            setButtonTitleColor(sortModeButton, color: AppTheme.primaryBlue)
+            sortModeButton.title = "Size"
+            setButtonTitleColor(sortModeButton, color: AppTheme.text)
             sortModeButton.toolTip = "Sort by file size, largest first"
         }
     }
@@ -355,8 +389,9 @@ extension PlayerView {
         button.controlSize = .regular
         button.target = self
         button.toolTip = tooltip
-        button.contentTintColor = AppTheme.primaryBlue
-        setButtonTitleColor(button, color: AppTheme.primaryBlue)
+        button.contentTintColor = AppTheme.text
+        button.setAccessibilityLabel(tooltip)
+        setButtonTitleColor(button, color: AppTheme.text)
 
         if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip) {
             button.image = image.withSymbolConfiguration(
@@ -366,7 +401,7 @@ extension PlayerView {
             button.imageScaling = .scaleProportionallyDown
         }
 
-        styleFlatControl(button)
+        button.wantsLayer = true
     }
 
     internal func configureIconButton(_ button: NSButton, symbolName: String, tooltip: String) {
@@ -376,14 +411,15 @@ extension PlayerView {
         button.controlSize = .regular
         button.target = self
         button.toolTip = tooltip
-        button.contentTintColor = AppTheme.primaryBlue
+        button.contentTintColor = AppTheme.secondaryText
+        button.setAccessibilityLabel(tooltip)
         button.image = NSImage(
             systemSymbolName: symbolName,
             accessibilityDescription: tooltip
         )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
-        styleFlatControl(button)
+        button.wantsLayer = true
     }
 
     internal func stylePrimaryButton(_ button: NSButton, symbolName: String? = nil) {
@@ -392,7 +428,7 @@ extension PlayerView {
         button.contentTintColor = .white
         button.font = .systemFont(ofSize: 13, weight: .semibold)
         button.wantsLayer = true
-        button.layer?.backgroundColor = AppTheme.primaryBlue.cgColor
+        button.layer?.backgroundColor = AppTheme.accentFill.cgColor
         button.layer?.cornerRadius = 9
         setButtonTitleColor(button, color: .white)
         if let symbolName {
@@ -417,7 +453,7 @@ extension PlayerView {
     internal func styleLandingActionButton(_ button: NSButton, symbolName: String, isPrimary: Bool) {
         button.controlSize = .regular
         button.alignment = .center
-        button.font = .systemFont(ofSize: 15, weight: .semibold)
+        button.font = .systemFont(ofSize: 13, weight: .semibold)
         button.image = NSImage(
             systemSymbolName: symbolName,
             accessibilityDescription: button.title
@@ -425,14 +461,16 @@ extension PlayerView {
         button.imagePosition = .imageLeft
         button.imageHugsTitle = true
         button.imageScaling = .scaleProportionallyDown
-        button.layer?.cornerRadius = 13
+        button.layer?.cornerRadius = 8
 
         if isPrimary {
-            button.layer?.backgroundColor = AppTheme.primaryBlue.cgColor
+            button.layer?.backgroundColor = AppTheme.accentFill.cgColor
             setButtonTitleColor(button, color: .white)
         } else {
-            button.layer?.backgroundColor = AppTheme.controlBackground.cgColor
-            setButtonTitleColor(button, color: AppTheme.text)
+            button.layer?.backgroundColor = AppTheme.videoHighlight.cgColor
+            button.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+            button.contentTintColor = .white
+            setButtonTitleColor(button, color: .white)
         }
     }
 
@@ -440,25 +478,26 @@ extension PlayerView {
         button.translatesAutoresizingMaskIntoConstraints = false
         button.font = .systemFont(ofSize: 12, weight: .medium)
         styleSecondaryButton(button, symbolName: symbolName)
-        button.layer?.cornerRadius = 8
+        button.layer?.cornerRadius = 7
+        button.layer?.backgroundColor = AppTheme.panelBackground.cgColor
     }
 
     internal func styleUtilityButton(_ button: NSButton) {
         button.bezelStyle = .regularSquare
         button.isBordered = false
-        button.contentTintColor = AppTheme.primaryBlue
+        button.contentTintColor = AppTheme.secondaryText
         button.font = .systemFont(ofSize: 12, weight: .medium)
         button.imagePosition = .noImage
         styleFlatControl(button)
-        setButtonTitleColor(button, color: AppTheme.primaryBlue)
+        setButtonTitleColor(button, color: AppTheme.text)
     }
 
     internal func styleFlatControl(_ control: NSControl) {
         control.wantsLayer = true
-        control.layer?.backgroundColor = AppTheme.controlBackground.cgColor
+        control.layer?.backgroundColor = AppTheme.barBackground.cgColor
         control.layer?.borderWidth = 1
         control.layer?.borderColor = AppTheme.border.cgColor
-        control.layer?.cornerRadius = 11
+        control.layer?.cornerRadius = 7
     }
 
     internal func setButtonTitleColor(_ button: NSButton, color: NSColor) {
@@ -473,25 +512,9 @@ extension PlayerView {
         )
     }
 
-    internal func makePlaylistCell() -> NSTableCellView {
-        let cell = NSTableCellView()
+    internal func makePlaylistCell() -> PlaylistCellView {
+        let cell = PlaylistCellView(frame: .zero)
         cell.identifier = Self.playlistCellIdentifier
-
-        let label = NSTextField(labelWithString: "")
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.lineBreakMode = .byTruncatingMiddle
-        label.maximumNumberOfLines = 1
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-
-        cell.addSubview(label)
-        cell.textField = label
-
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-        ])
-
         return cell
     }
 

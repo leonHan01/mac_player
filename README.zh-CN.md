@@ -75,6 +75,14 @@ swift run MacVideoPlayer
 swift test
 ```
 
+如果工具链没有 XCTest（例如仅安装 Command Line Tools），可使用 Python 3 运行核心回归检查：
+
+```sh
+python3 scripts/test-regressions.py
+```
+
+检查使用临时文件和模拟 libmpv 客户端，覆盖标签保存、列表筛选和排序、播放事件、异步命令、截图以及首次 DMG 打包的目录流程。不会打开播放器窗口或解码视频；真实播放和 DMG 镜像生成仍需单独做集成验证。
+
 ## 播放和快捷操作
 
 - `文件 > 打开...`：打开视频，并扫描所在文件夹中的支持格式视频。

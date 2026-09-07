@@ -1,7 +1,20 @@
 import Foundation
 
+enum TagStoreError: LocalizedError {
+    case loadFailed(path: String, reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .loadFailed(path, reason):
+            "Tags could not be read from \(path). The original file has been preserved. Restore or repair it and reopen the app before editing tags. \(reason)"
+        }
+    }
+}
+
 final class TagStore {
+    private(set) var loadError: TagStoreError?
     private var tagsByPath: [String: [String]] = [:]
+    private var containsLegacyFileKeys = false
     private let storeURL: URL
 
     init(storeURL customStoreURL: URL? = nil) {
@@ -23,8 +36,11 @@ final class TagStore {
                 withIntermediateDirectories: true
             )
             try load()
+            containsLegacyFileKeys = tagsByPath.keys.contains { $0.hasPrefix("file-id:") }
         } catch {
+            loadError = .loadFailed(path: storeURL.path, reason: error.localizedDescription)
             tagsByPath = [:]
+            containsLegacyFileKeys = false
         }
     }
 
@@ -33,6 +49,7 @@ final class TagStore {
     }
 
     func setTags(_ tags: [String], for url: URL) throws {
+        if let loadError { throw loadError }
         let normalizedTags = normalize(tags)
         let fileKey = key(for: url)
         let keysToReplace = keys(for: url)
@@ -48,6 +65,7 @@ final class TagStore {
 
         try save(updatedTagsByPath)
         tagsByPath = updatedTagsByPath
+        containsLegacyFileKeys = tagsByPath.keys.contains { $0.hasPrefix("file-id:") }
     }
 
     func addTag(_ tag: String, for url: URL) throws {
@@ -119,6 +137,10 @@ final class TagStore {
 
     private func keys(for url: URL) -> Set<String> {
         let pathKey = legacyPathKey(for: url)
+        guard containsLegacyFileKeys else {
+            return [pathKey]
+        }
+
         if let legacyFileKey = legacyFileKey(for: url) {
             return [legacyFileKey, pathKey]
         }

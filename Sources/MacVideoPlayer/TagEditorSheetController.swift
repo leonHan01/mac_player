@@ -45,6 +45,11 @@ private final class TagEditorTokenButton: NSButton {
         nil
     }
 
+    override var intrinsicContentSize: NSSize {
+        let size = title.size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 14)])
+        return NSSize(width: ceil(size.width) + 24, height: 32)
+    }
+
     enum Kind {
         case current
         case suggestion
@@ -221,7 +226,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         tagInput.placeholderString = "Type a tag, or separate several with commas"
         tagInput.font = .systemFont(ofSize: 14, weight: .regular)
         tagInput.textColor = AppTheme.text
-        tagInput.backgroundColor = .white
+        tagInput.backgroundColor = AppTheme.controlBackground
         tagInput.bezelStyle = .roundedBezel
         tagInput.focusRingType = .default
         tagInput.target = self
@@ -409,7 +414,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         button.isBordered = false
         button.font = .systemFont(ofSize: 14, weight: .semibold)
         button.wantsLayer = true
-        button.layer?.backgroundColor = AppTheme.primaryBlue.cgColor
+        button.layer?.backgroundColor = AppTheme.accentFill.cgColor
         button.layer?.cornerRadius = 9
         button.attributedTitle = NSAttributedString(
             string: button.title,

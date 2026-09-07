@@ -32,7 +32,7 @@ final class PlayerWindow: NSWindow {
         self.seekBackwardAction = seekBackwardAction
         self.deleteAction = deleteAction
 
-        let contentRect = NSRect(x: 0, y: 0, width: 1120, height: 700)
+        let contentRect = NSRect(x: 0, y: 0, width: 1240, height: 780)
         super.init(
             contentRect: contentRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],

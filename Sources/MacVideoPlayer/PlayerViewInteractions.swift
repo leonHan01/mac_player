@@ -15,14 +15,11 @@ extension PlayerView {
         let cell = tableView.makeView(
             withIdentifier: Self.playlistCellIdentifier,
             owner: self
-        ) as? NSTableCellView ?? makePlaylistCell()
+        ) as? PlaylistCellView ?? makePlaylistCell()
 
         let url = playerController.playlistURLs[row]
-        let prefix = "\(row + 1). "
         let isCurrent = playerController.currentPlaylistIndex.map { $0 == row } ?? false
-        cell.textField?.stringValue = prefix + url.lastPathComponent
-        cell.textField?.textColor = isCurrent ? AppTheme.primaryBlue : AppTheme.text
-        cell.toolTip = url.path
+        cell.configure(url: url, index: row, isCurrent: isCurrent)
         return cell
     }
 
@@ -79,6 +76,7 @@ extension PlayerView {
             try tagStore.addTag(tag, for: url)
             newTagField.stringValue = ""
             refreshAfterTagMutation()
+            restorePlaybackShortcutFocus()
         } catch {
             presentTagError(error)
         }
@@ -102,17 +100,9 @@ extension PlayerView {
 
     internal func refreshAfterTagMutation() {
         do {
-            if let activeTagFilter = playerController.activeTagFilter {
-                try playerController.applyTagFilter(activeTagFilter, tagStore: tagStore)
-            }
-            playerController.refreshCurrentItem()
+            try playerController.refreshAfterTagMutation(tagStore: tagStore)
         } catch {
-            do {
-                try playerController.applyTagFilter(nil, tagStore: tagStore)
-                playerController.refreshCurrentItem()
-            } catch {
-                presentTagError(error)
-            }
+            presentTagError(error)
         }
     }
 

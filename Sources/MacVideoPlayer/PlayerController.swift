@@ -211,9 +211,10 @@ final class PlayerController: NSObject {
         loadingMessage = "Loading videos..."
 
         do {
+            let urls = VideoFileScanner.sorted(result.urls, sortMode: sortMode, fileSizes: result.fileSizes)
             try loadPlaylist(
-                result.urls,
-                startingAt: result.startURL,
+                urls,
+                startingAt: result.startsAtFirstVideo ? (urls.first ?? result.startURL) : result.startURL,
                 fileSizes: result.fileSizes
             )
         } catch {
@@ -341,6 +342,17 @@ final class PlayerController: NSObject {
         }
     }
 
+    func refreshAfterTagMutation(tagStore: TagStore) throws {
+        if let activeTagFilter {
+            do {
+                try applyTagFilter(activeTagFilter, tagStore: tagStore)
+            } catch {
+                try applyTagFilter(nil, tagStore: tagStore)
+            }
+        }
+        refreshCurrentItem()
+    }
+
     func refreshCurrentItem() {
         onItemChanged?()
     }
@@ -416,8 +428,8 @@ final class PlayerController: NSObject {
         mpvPlayback.setMuted(muted)
     }
 
-    func captureScreenshot() throws {
-        let url = try mpvPlayback.captureScreenshot()
+    func captureScreenshot() async throws {
+        let url = try await mpvPlayback.captureScreenshot()
         onScreenshotSaved?(url)
     }
 
