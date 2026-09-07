@@ -1,5 +1,32 @@
 import AppKit
 
+struct ArrowKeySeekAcceleration {
+    static let holdThreshold: TimeInterval = 5
+    static let acceleratedMultiplier: Double = 2.5
+
+    private var heldKeyCode: UInt16?
+    private var holdStartTimestamp: TimeInterval?
+
+    mutating func seekMultiplier(for keyCode: UInt16, isRepeat: Bool, timestamp: TimeInterval) -> Double {
+        guard isRepeat,
+              heldKeyCode == keyCode,
+              let holdStartTimestamp
+        else {
+            heldKeyCode = keyCode
+            holdStartTimestamp = timestamp
+            return 1
+        }
+
+        return timestamp - holdStartTimestamp > Self.holdThreshold ? Self.acceleratedMultiplier : 1
+    }
+
+    mutating func endHold(for keyCode: UInt16) {
+        guard heldKeyCode == keyCode else { return }
+        heldKeyCode = nil
+        holdStartTimestamp = nil
+    }
+}
+
 @MainActor
 final class PlayerWindow: NSWindow {
     private static let deleteKeyCodes: Set<UInt16> = [51, 117]
@@ -7,10 +34,11 @@ final class PlayerWindow: NSWindow {
     private let previousAction: () -> Void
     private let nextAction: () -> Void
     private let playPauseAction: () -> Void
-    private let seekForwardAction: () -> Void
-    private let seekBackwardAction: () -> Void
+    private let seekForwardAction: (Double) -> Void
+    private let seekBackwardAction: (Double) -> Void
     private let deleteAction: () -> Void
     private var playerContentView: PlayerView?
+    private var arrowKeySeekAcceleration = ArrowKeySeekAcceleration()
 
     init(
         playerController: PlayerController,
@@ -21,8 +49,8 @@ final class PlayerWindow: NSWindow {
         nextAction: @escaping () -> Void,
         playPauseAction: @escaping () -> Void,
         sortAction: @escaping () -> Void,
-        seekForwardAction: @escaping () -> Void,
-        seekBackwardAction: @escaping () -> Void,
+        seekForwardAction: @escaping (Double) -> Void,
+        seekBackwardAction: @escaping (Double) -> Void,
         deleteAction: @escaping () -> Void
     ) {
         self.previousAction = previousAction
@@ -40,7 +68,7 @@ final class PlayerWindow: NSWindow {
             defer: false
         )
 
-        title = "Mac Video Player"
+        title = AppStrings.appName
         appearance = NSAppearance(named: .aqua)
         backgroundColor = AppTheme.windowBackground
         titleVisibility = .hidden
@@ -60,9 +88,18 @@ final class PlayerWindow: NSWindow {
         contentView = playerView
     }
 
+    func applyLanguage() {
+        title = AppStrings.appName
+        playerContentView?.applyLanguage()
+    }
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .scrollWheel, playerContentView?.handleScrollWheel(event) == true {
             return
+        }
+
+        if event.type == .keyUp, event.keyCode == 123 || event.keyCode == 124 {
+            arrowKeySeekAcceleration.endHold(for: event.keyCode)
         }
 
         let modifierKeys = event.modifierFlags.intersection([.command, .option, .control, .shift])
@@ -78,10 +115,10 @@ final class PlayerWindow: NSWindow {
                 nextAction()
                 return
             case 123:
-                seekBackwardAction()
+                seekBackwardAction(seekMultiplier(for: event))
                 return
             case 124:
-                seekForwardAction()
+                seekForwardAction(seekMultiplier(for: event))
                 return
             case 51, 117:
                 deleteAction()
@@ -105,5 +142,13 @@ final class PlayerWindow: NSWindow {
 
     private var isEditingText: Bool {
         firstResponder is NSTextView || firstResponder is NSTextField
+    }
+
+    private func seekMultiplier(for event: NSEvent) -> Double {
+        arrowKeySeekAcceleration.seekMultiplier(
+            for: event.keyCode,
+            isRepeat: event.isARepeat,
+            timestamp: event.timestamp
+        )
     }
 }

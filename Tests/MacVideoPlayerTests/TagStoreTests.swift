@@ -2,8 +2,9 @@ import Foundation
 import XCTest
 @testable import MacVideoPlayer
 
+@MainActor
 final class TagStoreTests: XCTestCase {
-    func testExistingFilesUseTheirStandardizedPathAsThePersistedKey() throws {
+    func testExistingFilesUseTheirStandardizedPathAsThePersistedKey() async throws {
         let directoryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MacVideoPlayerTests-\(UUID().uuidString)", isDirectory: true)
         let storeURL = directoryURL.appendingPathComponent("tags.json")
@@ -14,13 +15,13 @@ final class TagStoreTests: XCTestCase {
         try Data().write(to: videoURL)
 
         let store = TagStore(storeURL: storeURL)
-        try store.setTags(["Review"], for: videoURL)
+        try await store.setTags(["Review"], for: videoURL)
 
         let persistedTags = try JSONDecoder().decode([String: [String]].self, from: Data(contentsOf: storeURL))
         XCTAssertEqual(persistedTags, [videoURL.standardizedFileURL.path: ["Review"]])
     }
 
-    func testRemovingOneTagPreservesOtherTags() throws {
+    func testRemovingOneTagPreservesOtherTags() async throws {
         let directoryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MacVideoPlayerTests-\(UUID().uuidString)", isDirectory: true)
         let storeURL = directoryURL.appendingPathComponent("tags.json")
@@ -28,8 +29,8 @@ final class TagStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directoryURL) }
 
         let store = TagStore(storeURL: storeURL)
-        try store.setTags(["Work", "Review", "work"], for: videoURL)
-        try store.removeTag(" work ", for: videoURL)
+        try await store.setTags(["Work", "Review", "work"], for: videoURL)
+        try await store.removeTag(" work ", for: videoURL)
 
         XCTAssertEqual(store.tags(for: videoURL), ["Review"])
     }

@@ -10,6 +10,7 @@ enum MPVPlaybackUpdate {
 final class PlayerController: NSObject {
     let player = AVPlayer()
     var onItemChanged: (() -> Void)?
+    var onPlaybackStateChanged: (() -> Void)?
     var onPlaybackProgressed: (() -> Void)?
     var onPlaybackModeChanged: (() -> Void)?
     var onSortModeChanged: (() -> Void)?
@@ -18,12 +19,18 @@ final class PlayerController: NSObject {
     var onRendererChanged: ((Bool) -> Void)?
     var onScreenshotSaved: ((URL) -> Void)?
 
-    private var sourcePlaylist: [URL] = []
+    private var playlistsBySortMode: [SortMode: [URL]] = [:]
+    private var sourcePlaylist: [URL] { playlistsBySortMode[sortMode] ?? [] }
     private var playlist: [URL] = []
-    private var fileSizes: [URL: Int64] = [:]
+    private(set) var playlistScopeRevision: UInt64 = 0
+    private(set) var playlistRevision: UInt64 = 0
     private var currentIndex = 0
     private var playbackHistory: [Int] = []
     private var activeLoadID: UUID?
+    private var scanTask: Task<PlaylistLoadResult, Error>?
+    private var removedPathsDuringScan = Set<String>()
+    private let scan: @Sendable (URL, SortMode) throws -> PlaylistLoadResult
+    private let trash: @Sendable (URL) throws -> Void
     private var itemStatusObservation: NSKeyValueObservation?
     private weak var mpvVideoView: MPVVideoView?
     private let mpvPlayback = MPVPlayback()
@@ -32,9 +39,20 @@ final class PlayerController: NSObject {
     private(set) var sortMode: SortMode = .nameAscending
     private(set) var activeTagFilter: String?
     private(set) var isLoading = false
-    private(set) var loadingMessage = "Loading videos..."
+    private(set) var loadingMessage = AppStrings.loadingVideos
 
-    override init() {
+    override convenience init() {
+        self.init(scan: { try VideoFileScanner.buildLoadResult(for: $0, sortMode: $1) })
+    }
+
+    init(
+        scan: @escaping @Sendable (URL, SortMode) throws -> PlaylistLoadResult,
+        trash: @escaping @Sendable (URL) throws -> Void = {
+            try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
+        }
+    ) {
+        self.scan = scan
+        self.trash = trash
         super.init()
         mpvPlayback.onStateChanged = { [weak self] in
             self?.handleMPVPlaybackUpdate(.state)
@@ -99,14 +117,14 @@ final class PlayerController: NSObject {
 
     var windowTitle: String {
         if isLoading {
-            return "Loading Videos - Mac Video Player"
+            return AppStrings.loadingWindowTitle
         }
 
         guard let currentVideoURL else {
-            return "Mac Video Player"
+            return AppStrings.appName
         }
 
-        return "\(currentIndex + 1)/\(playlist.count) \(currentVideoURL.lastPathComponent) - Mac Video Player"
+        return AppStrings.playerWindowTitle(index: currentIndex, count: playlist.count, filename: currentVideoURL.lastPathComponent)
     }
 
     var playlistScopeURLs: [URL] {
@@ -158,22 +176,27 @@ final class PlayerController: NSObject {
     }
 
     func load(url: URL) {
+        scanTask?.cancel()
+        removedPathsDuringScan.removeAll()
         player.pause()
         mpvPlayback.pause()
 
         let loadID = UUID()
         activeLoadID = loadID
         isLoading = true
-        loadingMessage = "Loading videos from \(url.lastPathComponent)..."
+        loadingMessage = AppStrings.loadingVideos(from: url.lastPathComponent)
         onLoadingChanged?()
 
         let currentSortMode = sortMode
+        let scan = self.scan
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            return try scan(url, currentSortMode)
+        }
+        scanTask = task
         Task { [weak self] in
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try VideoFileScanner.buildLoadResult(for: url, sortMode: currentSortMode)
-                }.value
-
+                let result = try await task.value
                 self?.finishLoad(result, loadID: loadID)
             } catch {
                 self?.failLoad(url: url, error: error, loadID: loadID)
@@ -184,7 +207,7 @@ final class PlayerController: NSObject {
     private func loadPlaylist(
         _ urls: [URL],
         startingAt startURL: URL,
-        fileSizes: [URL: Int64]
+        playlistsBySortMode: [SortMode: [URL]]
     ) throws {
         guard !urls.isEmpty else {
             throw OpenVideoError.noPlayableFiles("(empty selection)")
@@ -194,9 +217,10 @@ final class PlayerController: NSObject {
             throw OpenVideoError.fileMissing
         }
 
-        sourcePlaylist = urls
+        self.playlistsBySortMode = playlistsBySortMode
+        playlistScopeRevision &+= 1
         playlist = urls
-        self.fileSizes = fileSizes
+        playlistRevision &+= 1
         currentIndex = startIndex
         activeTagFilter = nil
         playbackHistory.removeAll()
@@ -206,16 +230,22 @@ final class PlayerController: NSObject {
     private func finishLoad(_ result: PlaylistLoadResult, loadID: UUID) {
         guard activeLoadID == loadID else { return }
 
+        let removedPaths = removedPathsDuringScan
+        removedPathsDuringScan.removeAll()
         activeLoadID = nil
+        scanTask = nil
         isLoading = false
-        loadingMessage = "Loading videos..."
+        loadingMessage = AppStrings.loadingVideos
 
         do {
-            let urls = VideoFileScanner.sorted(result.urls, sortMode: sortMode, fileSizes: result.fileSizes)
+            let orders = removedPaths.isEmpty ? result.playlistsBySortMode : result.playlistsBySortMode.mapValues {
+                $0.filter { !removedPaths.contains($0.standardizedFileURL.path) }
+            }
+            let urls = orders[sortMode] ?? []
             try loadPlaylist(
                 urls,
                 startingAt: result.startsAtFirstVideo ? (urls.first ?? result.startURL) : result.startURL,
-                fileSizes: result.fileSizes
+                playlistsBySortMode: orders
             )
         } catch {
             onLoadFailed?(result.requestedURL, error)
@@ -227,9 +257,11 @@ final class PlayerController: NSObject {
     private func failLoad(url: URL, error: Error, loadID: UUID) {
         guard activeLoadID == loadID else { return }
 
+        removedPathsDuringScan.removeAll()
         activeLoadID = nil
+        scanTask = nil
         isLoading = false
-        loadingMessage = "Loading videos..."
+        loadingMessage = AppStrings.loadingVideos
         onLoadingChanged?()
         onLoadFailed?(url, error)
     }
@@ -293,6 +325,10 @@ final class PlayerController: NSObject {
     func toggleSortMode(tagStore: TagStore) {
         let previousSortMode = sortMode
         sortMode = sortMode == .nameAscending ? .sizeDescending : .nameAscending
+        guard !playlist.isEmpty else {
+            onSortModeChanged?()
+            return
+        }
 
         do {
             try rebuildPlaylist(tagStore: tagStore)
@@ -324,6 +360,7 @@ final class PlayerController: NSObject {
         }
 
         playlist = filteredPlaylist
+        playlistRevision &+= 1
         currentIndex = previousURL.flatMap { previousURL in
             filteredPlaylist.firstIndex {
                 VideoFileScanner.isSameFile($0, previousURL)
@@ -395,7 +432,7 @@ final class PlayerController: NSObject {
             } else {
                 mpvPlayback.play()
             }
-            onItemChanged?()
+            onPlaybackStateChanged?()
             return
         }
 
@@ -433,31 +470,38 @@ final class PlayerController: NSObject {
         onScreenshotSaved?(url)
     }
 
-    func deleteCurrentVideo(tagStore: TagStore) throws {
-        guard let url = currentVideoURL else { return }
-
-        let existingTags = tagStore.tags(for: url)
-        stopNativePlayback()
-        stopMPVPlayback()
-        try tagStore.removeTags(for: url)
-
-        var trashedURL: NSURL?
-        do {
-            try FileManager.default.trashItem(at: url, resultingItemURL: &trashedURL)
-        } catch {
-            try? tagStore.setTags(existingTags, for: url)
-            throw error
+    func deleteVideo(at url: URL, tagStore: TagStore) async throws {
+        if currentVideoURL.map({ VideoFileScanner.isSameFile($0, url) }) == true {
+            stopNativePlayback()
+            stopMPVPlayback()
         }
+        let trash = self.trash
+        try await tagStore.removeTags(for: url) { try trash(url) }
+        if activeLoadID != nil { removedPathsDuringScan.insert(url.standardizedFileURL.path) }
 
-        sourcePlaylist.removeAll { VideoFileScanner.isSameFile($0, url) }
-        fileSizes = fileSizes.filter { !VideoFileScanner.isSameFile($0.key, url) }
-        playlist.remove(at: currentIndex)
+        // The user may have selected another item or opened another folder
+        // while I/O ran. Remove the captured URL, never the new selection.
+        let selectedURL = currentVideoURL
+        if selectedURL.map({ VideoFileScanner.isSameFile($0, url) }) == true {
+            stopNativePlayback()
+            stopMPVPlayback()
+        }
+        for mode in SortMode.allCases {
+            playlistsBySortMode[mode]?.removeAll { VideoFileScanner.isSameFile($0, url) }
+        }
+        playlistScopeRevision &+= 1
+        guard let removedIndex = playlist.firstIndex(where: { VideoFileScanner.isSameFile($0, url) }) else {
+            onItemChanged?()
+            return
+        }
+        playlist.remove(at: removedIndex)
+        playlistRevision &+= 1
         playbackHistory = playbackHistory.compactMap { index in
-            if index == currentIndex {
+            if index == removedIndex {
                 return nil
             }
 
-            return index > currentIndex ? index - 1 : index
+            return index > removedIndex ? index - 1 : index
         }
 
         if playlist.isEmpty {
@@ -466,10 +510,13 @@ final class PlayerController: NSObject {
             return
         }
 
-        if currentIndex >= playlist.count {
-            currentIndex = playlist.count - 1
+        if let selectedURL, !VideoFileScanner.isSameFile(selectedURL, url),
+           let index = playlist.firstIndex(where: { VideoFileScanner.isSameFile($0, selectedURL) }) {
+            currentIndex = index
+            onItemChanged?()
+            return
         }
-
+        currentIndex = min(removedIndex, playlist.count - 1)
         play(url: playlist[currentIndex])
     }
 
@@ -515,6 +562,11 @@ final class PlayerController: NSObject {
     }
 
     func shutdown() {
+        scanTask?.cancel()
+        scanTask = nil
+        activeLoadID = nil
+        removedPathsDuringScan.removeAll()
+        isLoading = false
         stopNativePlayback()
         mpvPlayback.shutdown()
         onRendererChanged?(false)
@@ -523,7 +575,7 @@ final class PlayerController: NSObject {
     func handleMPVPlaybackUpdate(_ update: MPVPlaybackUpdate) {
         switch update {
         case .state:
-            onItemChanged?()
+            onPlaybackStateChanged?()
         case .progress:
             onPlaybackProgressed?()
         }
@@ -599,11 +651,7 @@ final class PlayerController: NSObject {
             filtered = sourcePlaylist
         }
 
-        return sorted(filtered)
-    }
-
-    private func sorted(_ urls: [URL]) -> [URL] {
-        VideoFileScanner.sorted(urls, sortMode: sortMode, fileSizes: fileSizes)
+        return filtered
     }
 
     deinit {

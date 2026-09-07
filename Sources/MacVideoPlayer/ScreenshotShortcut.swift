@@ -168,7 +168,7 @@ final class ShortcutRecorderButton: NSButton {
     }
 
     private func updateTitle() {
-        title = isRecording ? "Press shortcut…" : shortcut.displayString
-        toolTip = "Click, then press a shortcut with Command, Option, Control, or Shift."
+        title = isRecording ? AppStrings.pressShortcut : shortcut.displayString
+        toolTip = AppStrings.shortcutRecorderTooltip
     }
 }

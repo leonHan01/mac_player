@@ -6,6 +6,10 @@ extension PlayerView {
             playerSurface.trailingAnchor.constraint(equalTo: playlistPanel.leadingAnchor, constant: -18),
             playerSurface.bottomAnchor.constraint(equalTo: tagBar.topAnchor, constant: -4)
         ]
+        collapsedLibraryLayoutConstraints = [
+            playerSurface.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+            playerSurface.bottomAnchor.constraint(equalTo: tagBar.topAnchor, constant: -4)
+        ]
         emptyLayoutConstraints = [
             playerSurface.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             playerSurface.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20)
@@ -27,7 +31,11 @@ extension PlayerView {
             titleSubtitleLabel.topAnchor.constraint(equalTo: titlebar.centerYAnchor, constant: 3),
             titleSubtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: titleFolderButton.leadingAnchor, constant: -24),
 
-            titleOpenButton.trailingAnchor.constraint(equalTo: titlebar.trailingAnchor, constant: -20),
+            playlistToggleButton.trailingAnchor.constraint(equalTo: titlebar.trailingAnchor, constant: -20),
+            playlistToggleButton.centerYAnchor.constraint(equalTo: titlebar.centerYAnchor),
+            playlistToggleButton.widthAnchor.constraint(equalToConstant: 34),
+            playlistToggleButton.heightAnchor.constraint(equalToConstant: 30),
+            titleOpenButton.trailingAnchor.constraint(equalTo: playlistToggleButton.leadingAnchor, constant: -8),
             titleOpenButton.centerYAnchor.constraint(equalTo: titlebar.centerYAnchor),
             titleOpenButton.widthAnchor.constraint(equalToConstant: 78),
             titleOpenButton.heightAnchor.constraint(equalToConstant: 30),
@@ -142,9 +150,22 @@ extension PlayerView {
     }
 
     internal func updateLibraryLayout(hasPlaylist: Bool) {
-        guard showsLibraryLayout != hasPlaylist else { return }
-        NSLayoutConstraint.deactivate(hasPlaylist ? emptyLayoutConstraints : libraryLayoutConstraints)
-        NSLayoutConstraint.activate(hasPlaylist ? libraryLayoutConstraints : emptyLayoutConstraints)
+        let showPlaylist = hasPlaylist && !isPlaylistCollapsed
+        let constraints = hasPlaylist
+            ? (showPlaylist ? libraryLayoutConstraints : collapsedLibraryLayoutConstraints)
+            : emptyLayoutConstraints
+        if !constraints.allSatisfy(\.isActive) {
+            NSLayoutConstraint.deactivate(libraryLayoutConstraints + collapsedLibraryLayoutConstraints + emptyLayoutConstraints)
+            NSLayoutConstraint.activate(constraints)
+        }
         showsLibraryLayout = hasPlaylist
+        playlistPanel.isHidden = !showPlaylist
+        playlistToggleButton.isEnabled = hasPlaylist
+        playlistToggleButton.state = showPlaylist ? .on : .off
+        playlistToggleButton.contentTintColor = showPlaylist ? AppTheme.primaryBlue : AppTheme.secondaryText
+        playlistToggleButton.layer?.backgroundColor = (showPlaylist ? AppTheme.selectedBlue : AppTheme.panelBackground).cgColor
+        let action = showPlaylist ? AppStrings.hidePlaylist : AppStrings.showPlaylist
+        playlistToggleButton.toolTip = action
+        playlistToggleButton.setAccessibilityLabel(action)
     }
 }

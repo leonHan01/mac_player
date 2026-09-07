@@ -1,6 +1,10 @@
 import AppKit
 
 extension PlayerView {
+    func controlTextDidEndEditing(_ notification: Notification) {
+        updateTagControls()
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
         playerController.playlistURLs.count
     }
@@ -44,6 +48,12 @@ extension PlayerView {
         openFolderAction()
     }
 
+    @objc internal func togglePlaylistButtonPressed(_ sender: NSButton) {
+        guard playerController.hasPlaylist else { return }
+        isPlaylistCollapsed.toggle()
+        updateLibraryLayout(hasPlaylist: true)
+    }
+
     @objc internal func previousButtonPressed(_ sender: NSButton) {
         previousAction()
     }
@@ -61,6 +71,7 @@ extension PlayerView {
     }
 
     @objc internal func addTagButtonPressed(_ sender: Any?) {
+        guard tagMutationTask == nil else { return }
         guard let url = playerController.currentVideoURL else {
             NSSound.beep()
             return
@@ -72,17 +83,29 @@ extension PlayerView {
             return
         }
 
-        do {
-            try tagStore.addTag(tag, for: url)
-            newTagField.stringValue = ""
-            refreshAfterTagMutation()
-            restorePlaybackShortcutFocus()
-        } catch {
-            presentTagError(error)
+        newTagField.stringValue = ""
+        restorePlaybackShortcutFocus()
+        addTagButton.isEnabled = false
+        tagMutationTask = Task { [self] in
+            defer {
+                tagMutationTask = nil
+                addTagButton.isEnabled = true
+            }
+            do {
+                try await tagStore.addTag(tag, for: url)
+                refreshAfterTagMutation()
+            } catch {
+                if playerController.currentVideoURL == url,
+                   newTagField.stringValue.isEmpty, newTagField.currentEditor() == nil {
+                    newTagField.stringValue = tag
+                }
+                presentTagError(error)
+            }
         }
     }
 
     @objc internal func removeTagButtonPressed(_ sender: NSButton) {
+        guard tagMutationTask == nil else { return }
         guard
             let tagButton = sender as? TagChipButton,
             let url = playerController.currentVideoURL
@@ -90,11 +113,15 @@ extension PlayerView {
             return
         }
 
-        do {
-            try tagStore.removeTag(tagButton.tagValue, for: url)
-            refreshAfterTagMutation()
-        } catch {
-            presentTagError(error)
+        let tag = tagButton.tagValue
+        tagMutationTask = Task { [self] in
+            defer { tagMutationTask = nil }
+            do {
+                try await tagStore.removeTag(tag, for: url)
+                refreshAfterTagMutation()
+            } catch {
+                presentTagError(error)
+            }
         }
     }
 

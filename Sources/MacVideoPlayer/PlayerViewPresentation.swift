@@ -2,6 +2,52 @@ import AppKit
 import AVKit
 
 extension PlayerView {
+    internal func applyLanguage() {
+        titleLabel.stringValue = AppStrings.appName
+        playlistTitleLabel.stringValue = AppStrings.playlist
+        currentTagsLabel.stringValue = AppStrings.tags
+        emptyHintLabel.stringValue = AppStrings.localFilesHint
+
+        titleOpenButton.title = AppStrings.open
+        styleTitleButton(titleOpenButton, symbolName: "plus")
+        titleOpenButton.toolTip = AppStrings.openVideo
+        titleFolderButton.title = AppStrings.folder
+        styleTitleButton(titleFolderButton, symbolName: "folder")
+        titleFolderButton.toolTip = AppStrings.openFolder
+
+        newTagField.placeholderString = AppStrings.addTag
+        newTagField.toolTip = AppStrings.tagInputHint
+        addTagButton.title = AppStrings.add
+        styleUtilityButton(addTagButton)
+        addTagButton.toolTip = AppStrings.addTagTooltip
+        tagFilterPopup.toolTip = AppStrings.filterTagsTooltip
+        sortModeButton.image = NSImage(systemSymbolName: "arrow.up.arrow.down", accessibilityDescription: AppStrings.sort)
+
+        openButton.title = AppStrings.openVideo
+        stylePrimaryButton(openButton, symbolName: "play.fill")
+        styleLandingActionButton(openButton, symbolName: "play.fill", isPrimary: true)
+        openFolderButton.title = AppStrings.openFolder
+        styleSecondaryButton(openFolderButton, symbolName: "folder")
+        styleLandingActionButton(openFolderButton, symbolName: "folder", isPrimary: false)
+
+        configureNavigationButton(previousButton, title: "", symbolName: "backward.end.fill", tooltip: AppStrings.previousVideo)
+        configureNavigationButton(playPauseButton, title: "", symbolName: "play.fill", tooltip: AppStrings.playOrPause)
+        configureNavigationButton(nextButton, title: "", symbolName: "forward.end.fill", tooltip: AppStrings.nextVideo)
+        configureNavigationButton(playbackModeButton, title: "", symbolName: "list.bullet", tooltip: AppStrings.playbackOrder)
+        configureIconButton(volumeButton, symbolName: "speaker.wave.2.fill", tooltip: AppStrings.mute)
+        progressSlider.setAccessibilityLabel(AppStrings.playbackPosition)
+        volumeSlider.toolTip = AppStrings.adjustVolume
+        volumeSlider.setAccessibilityLabel(AppStrings.volume)
+
+        renderedPlaybackState = nil
+        renderedCurrentTags = nil
+        renderedAvailableTags = nil
+        updateEmptyState()
+        updateTagControls()
+        playlistTableView.reloadData()
+        updatePlaylist()
+    }
+
     internal func restorePlaybackShortcutFocus() {
         guard playerController.hasActivePlayback, let window else { return }
 
@@ -24,7 +70,7 @@ extension PlayerView {
         updateLibraryLayout(hasPlaylist: hasPlaylist)
         updateCanvasAppearance(hasItem: hasItem)
         playerView.isHidden = !hasItem || !mpvPlayerView.isHidden
-        emptyTitleLabel.stringValue = isLoading ? "Loading your library" : hasPlaylist ? "Ready when you are" : "Open a video"
+        emptyTitleLabel.stringValue = isLoading ? AppStrings.loadingLibrary : hasPlaylist ? AppStrings.readyWhenYouAre : AppStrings.openVideoHeading
         emptyTitleLabel.font = .systemFont(ofSize: hasPlaylist ? 22 : 28, weight: .medium)
         emptyIconView.image = NSImage(
             systemSymbolName: isLoading ? "arrow.triangle.2.circlepath" : "play.rectangle.on.rectangle",
@@ -32,16 +78,15 @@ extension PlayerView {
         )
         titleSubtitleLabel.stringValue = isLoading
             ? playerController.loadingMessage
-            : playerController.currentVideoURL?.lastPathComponent ?? "Your local video library"
+            : playerController.currentVideoURL?.lastPathComponent ?? AppStrings.localLibrary
         emptyState.stringValue = isLoading
             ? playerController.loadingMessage
-            : hasPlaylist ? "Choose a video from your playlist, or open another file." : "Drop a video here, or open a file or folder to get started."
+            : hasPlaylist ? AppStrings.playlistEmptyMessage : AppStrings.openFirstMessage
         emptyContainer.isHidden = hasItem && !isLoading
         emptyActions.isHidden = isLoading
         emptyIconView.isHidden = hasPlaylist
         emptyHintLabel.isHidden = hasPlaylist || isLoading
         tagBar.isHidden = !hasPlaylist
-        playlistPanel.isHidden = !hasPlaylist
         controlBar.isHidden = !hasPlaylist
         previousButton.isEnabled = hasPlaylist && !isLoading && playerController.hasPrevious
         playPauseButton.isEnabled = hasPlaylist && !isLoading
@@ -76,13 +121,13 @@ extension PlayerView {
         let urls = playerController.playlistURLs
         let count = urls.count
         let selection = playerController.currentPlaylistIndex
-        let playlistChanged = urls != renderedPlaylistURLs
+        let playlistChanged = renderedPlaylistRevision != playerController.playlistRevision
         let selectionChanged = selection != renderedPlaylistSelection
-        playlistCountLabel.stringValue = count == 1 ? "1 video" : "\(count) videos"
+        playlistCountLabel.stringValue = AppStrings.playlistCount(count)
 
         if playlistChanged {
             playlistTableView.reloadData()
-            renderedPlaylistURLs = urls
+            renderedPlaylistRevision = playerController.playlistRevision
         } else if selectionChanged {
             reloadPlaylistRows(changedFrom: renderedPlaylistSelection, to: selection)
         }
@@ -127,31 +172,38 @@ extension PlayerView {
     }
 
     internal func updateTagControls() {
-        guard let url = playerController.currentVideoURL else {
-            updateCurrentTagChips([])
-            newTagField.removeAllItems()
-            newTagField.stringValue = ""
-            tagFilterPopup.removeAllItems()
-            tagFilterPopup.addItem(withTitle: "Filter: All")
-            return
-        }
-
-        let currentTags = tagStore.tags(for: url)
+        let url = playerController.currentVideoURL
+        let currentTags = url.map { tagStore.tags(for: $0) } ?? []
         updateCurrentTagChips(currentTags)
 
-        let availableTags = tagStore.allTags(for: playerController.playlistScopeURLs)
-        let draft = newTagField.stringValue
-        let isEditingDraft = newTagField.currentEditor() != nil
-        newTagField.removeAllItems()
-        for tag in availableTags where !currentTags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
-            newTagField.addItem(withObjectValue: tag)
+        if cachedTagStoreRevision != tagStore.revision || cachedTagScopeRevision != playerController.playlistScopeRevision {
+            cachedAvailableTags = tagStore.allTags(for: playerController.playlistScopeURLs)
+            cachedTagStoreRevision = tagStore.revision
+            cachedTagScopeRevision = playerController.playlistScopeRevision
         }
-        newTagField.stringValue = isEditingDraft ? draft : ""
+        let availableTags = url == nil ? [] : cachedAvailableTags
+        let suggestions = availableTags.filter { tag in
+            !currentTags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+        }
+        // Updating a combo box's items/string while its field editor is active
+        // can discard an IME composition started during an asynchronous save.
+        if renderedTagSuggestions != suggestions, newTagField.currentEditor() == nil {
+            let draft = newTagField.stringValue
+            newTagField.removeAllItems()
+            newTagField.addItems(withObjectValues: suggestions)
+            newTagField.stringValue = draft
+            renderedTagSuggestions = suggestions
+        }
+        if renderedTagURL != url, newTagField.currentEditor() == nil {
+            newTagField.stringValue = ""
+        }
+        renderedTagURL = url
 
-        tagFilterPopup.removeAllItems()
-        tagFilterPopup.addItem(withTitle: "Filter: All")
-        for tag in availableTags {
-            tagFilterPopup.addItem(withTitle: tag)
+        if renderedAvailableTags != availableTags {
+            tagFilterPopup.removeAllItems()
+            tagFilterPopup.addItem(withTitle: AppStrings.filterAll)
+            tagFilterPopup.addItems(withTitles: availableTags)
+            renderedAvailableTags = availableTags
         }
 
         if let activeTagFilter = playerController.activeTagFilter,
@@ -163,13 +215,15 @@ extension PlayerView {
     }
 
     internal func updateCurrentTagChips(_ tags: [String]) {
+        guard renderedCurrentTags != tags else { return }
+        renderedCurrentTags = tags
         for view in currentTagsStack.arrangedSubviews {
             currentTagsStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
 
         if tags.isEmpty {
-            let emptyLabel = NSTextField(labelWithString: "No tags")
+            let emptyLabel = NSTextField(labelWithString: AppStrings.noTags)
             emptyLabel.textColor = AppTheme.secondaryText
             emptyLabel.font = .systemFont(ofSize: 11)
             currentTagsStack.addArrangedSubview(emptyLabel)
@@ -197,15 +251,15 @@ extension PlayerView {
     internal func presentTagError(_ error: Error) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Cannot Update Tags"
+        alert.messageText = AppStrings.cannotUpdateTags
         alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: AppStrings.ok)
         alert.runModal()
     }
 
     internal func showScreenshotToast(for url: URL) {
         screenshotToastDismissWorkItem?.cancel()
-        screenshotToastLabel.stringValue = "Screenshot saved to Pictures"
+        screenshotToastLabel.stringValue = AppStrings.screenshotSaved
         screenshotToast.toolTip = url.path
         screenshotToast.isHidden = false
         screenshotToast.alphaValue = 0
@@ -300,10 +354,11 @@ extension PlayerView {
         playPauseButton.title = ""
         playPauseButton.contentTintColor = .white
         playPauseButton.layer?.backgroundColor = AppTheme.accentFill.cgColor
-        playPauseButton.setAccessibilityLabel(isPlaying ? "Pause" : "Play")
+        let action = isPlaying ? AppStrings.pause : AppStrings.play
+        playPauseButton.setAccessibilityLabel(action)
         playPauseButton.image = NSImage(
             systemSymbolName: isPlaying ? "pause.fill" : "play.fill",
-            accessibilityDescription: isPlaying ? "Pause" : "Play"
+            accessibilityDescription: action
         )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 18, weight: .semibold))
     }
 
@@ -317,29 +372,31 @@ extension PlayerView {
             playbackModeButton.title = ""
             playbackModeButton.image = NSImage(
                 systemSymbolName: "list.bullet",
-                accessibilityDescription: "Order"
+                accessibilityDescription: AppStrings.playbackOrder
             )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
-            playbackModeButton.toolTip = "Sequential Playback"
+            playbackModeButton.toolTip = AppStrings.sequentialPlayback
+            playbackModeButton.setAccessibilityLabel(AppStrings.sequentialPlayback)
         case .shuffle:
             playbackModeButton.title = ""
             playbackModeButton.image = NSImage(
                 systemSymbolName: "shuffle",
-                accessibilityDescription: "Shuffle"
+                accessibilityDescription: AppStrings.shufflePlayback
             )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
-            playbackModeButton.toolTip = "Shuffle Playback"
+            playbackModeButton.toolTip = AppStrings.shufflePlayback
+            playbackModeButton.setAccessibilityLabel(AppStrings.shufflePlayback)
         }
     }
 
     internal func updateSortModeButton() {
         switch playerController.sortMode {
         case .nameAscending:
-            sortModeButton.title = "Name"
+            sortModeButton.title = AppStrings.name
             setButtonTitleColor(sortModeButton, color: AppTheme.text)
-            sortModeButton.toolTip = "Sort by filename"
+            sortModeButton.toolTip = AppStrings.sortByName
         case .sizeDescending:
-            sortModeButton.title = "Size"
+            sortModeButton.title = AppStrings.size
             setButtonTitleColor(sortModeButton, color: AppTheme.text)
-            sortModeButton.toolTip = "Sort by file size, largest first"
+            sortModeButton.toolTip = AppStrings.sortBySize
         }
     }
 
@@ -357,7 +414,7 @@ extension PlayerView {
 
         volumeButton.image = NSImage(
             systemSymbolName: symbolName,
-            accessibilityDescription: "Volume"
+            accessibilityDescription: AppStrings.volume
         )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
         volumeSlider.doubleValue = volume
     }

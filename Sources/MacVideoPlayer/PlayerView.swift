@@ -32,7 +32,7 @@ internal final class TagChipButton: NSButton {
         bezelStyle = .rounded
         font = .systemFont(ofSize: 11, weight: .medium)
         contentTintColor = AppTheme.primaryBlue
-        toolTip = "Remove tag \(tag)"
+        toolTip = "\(AppStrings.removeTag) \(tag)"
         wantsLayer = true
         layer?.backgroundColor = AppTheme.selectedBlue.cgColor
         layer?.cornerRadius = 6
@@ -55,13 +55,14 @@ internal final class TagChipButton: NSButton {
 }
 
 @MainActor
-final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
+final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSComboBoxDelegate {
     internal let titlebar = NSView()
     internal let titleIconView = NSImageView()
     internal let titleLabel = NSTextField(labelWithString: "Mac Video Player")
     internal let titleSubtitleLabel = NSTextField(labelWithString: "Your local video library")
     internal let titleOpenButton = NSButton(title: "Open", target: nil, action: nil)
     internal let titleFolderButton = NSButton(title: "Folder", target: nil, action: nil)
+    internal let playlistToggleButton = NSButton(title: "", target: nil, action: nil)
     internal let playerSurface = NSView()
     internal let playerView = AVPlayerView()
     internal let mpvPlayerView = MPVVideoView()
@@ -113,16 +114,26 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     internal var timeObserverToken: Any?
     internal var isSeeking = false
     internal var isSyncingPlaylistSelection = false
-    internal var renderedPlaylistURLs: [URL] = []
+    internal var renderedPlaylistRevision: UInt64?
     internal var renderedPlaylistSelection: Int?
     internal var renderedPlaybackState: Bool?
     internal var renderedCanvasHasItem: Bool?
+    internal var renderedCurrentTags: [String]?
+    internal var renderedTagSuggestions: [String]?
+    internal var renderedAvailableTags: [String]?
+    internal var renderedTagURL: URL?
+    internal var cachedTagStoreRevision: UInt64?
+    internal var cachedTagScopeRevision: UInt64?
+    internal var cachedAvailableTags: [String] = []
+    internal var tagMutationTask: Task<Void, Never>?
     internal var accumulatedScrollDeltaY: CGFloat = 0
     internal var lastWheelNavigationTime: TimeInterval = 0
     internal var screenshotToastDismissWorkItem: DispatchWorkItem?
     internal var libraryLayoutConstraints: [NSLayoutConstraint] = []
+    internal var collapsedLibraryLayoutConstraints: [NSLayoutConstraint] = []
     internal var emptyLayoutConstraints: [NSLayoutConstraint] = []
     internal var showsLibraryLayout = false
+    internal var isPlaylistCollapsed = false
 
     internal static let playlistColumnIdentifier = NSUserInterfaceItemIdentifier("PlaylistColumn")
     internal static let playlistCellIdentifier = NSUserInterfaceItemIdentifier("PlaylistCell")
@@ -176,6 +187,12 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         styleTitleButton(titleFolderButton, symbolName: "folder")
         titleFolderButton.target = self
         titleFolderButton.action = #selector(openFolderButtonPressed(_:))
+
+        styleTitleButton(playlistToggleButton, symbolName: "sidebar.right")
+        playlistToggleButton.setButtonType(.pushOnPushOff)
+        playlistToggleButton.imagePosition = .imageOnly
+        playlistToggleButton.target = self
+        playlistToggleButton.action = #selector(togglePlaylistButtonPressed(_:))
 
         playerSurface.wantsLayer = true
         playerSurface.layer?.backgroundColor = AppTheme.videoBackground.cgColor
@@ -283,24 +300,24 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         currentTagsScrollView.translatesAutoresizingMaskIntoConstraints = false
 
         Self.configureTagInputField(newTagField)
-        newTagField.placeholderString = "Add tag"
+        newTagField.placeholderString = AppStrings.addTag
         newTagField.completes = true
-        newTagField.toolTip = "Type a new tag or choose an existing tag, then press Return"
+        newTagField.toolTip = AppStrings.tagInputHint
         newTagField.target = self
         newTagField.action = #selector(addTagButtonPressed(_:))
 
         styleUtilityButton(addTagButton)
-        addTagButton.toolTip = "Add the tag"
+        addTagButton.toolTip = AppStrings.addTagTooltip
         addTagButton.target = self
         addTagButton.action = #selector(addTagButtonPressed(_:))
 
         styleUtilityButton(tagFilterPopup)
-        tagFilterPopup.toolTip = "Filter videos by tag"
+        tagFilterPopup.toolTip = AppStrings.filterTagsTooltip
         tagFilterPopup.target = self
         tagFilterPopup.action = #selector(tagFilterChanged(_:))
 
         styleUtilityButton(sortModeButton)
-        sortModeButton.image = NSImage(systemSymbolName: "arrow.up.arrow.down", accessibilityDescription: "Sort")
+        sortModeButton.image = NSImage(systemSymbolName: "arrow.up.arrow.down", accessibilityDescription: AppStrings.sort)
         sortModeButton.imagePosition = .imageLeading
         sortModeButton.target = self
         sortModeButton.action = #selector(sortModeButtonPressed(_:))
@@ -355,7 +372,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             previousButton,
             title: "",
             symbolName: "backward.end.fill",
-            tooltip: "Previous Video"
+            tooltip: AppStrings.previousVideo
         )
         previousButton.action = #selector(previousButtonPressed(_:))
 
@@ -363,7 +380,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             playPauseButton,
             title: "",
             symbolName: "play.fill",
-            tooltip: "Play or Pause"
+            tooltip: AppStrings.playOrPause
         )
         playPauseButton.action = #selector(playPauseButtonPressed(_:))
 
@@ -371,7 +388,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             nextButton,
             title: "",
             symbolName: "forward.end.fill",
-            tooltip: "Next Video"
+            tooltip: AppStrings.nextVideo
         )
         nextButton.action = #selector(nextButtonPressed(_:))
 
@@ -379,7 +396,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             playbackModeButton,
             title: "",
             symbolName: "list.bullet",
-            tooltip: "Switch Playback Mode"
+            tooltip: AppStrings.playbackOrder
         )
         playbackModeButton.action = #selector(playbackModeButtonPressed(_:))
 
@@ -411,20 +428,20 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         progressSlider.isContinuous = true
         progressSlider.controlSize = .small
         progressSlider.trackFillColor = AppTheme.primaryBlue
-        progressSlider.setAccessibilityLabel("Playback position")
+        progressSlider.setAccessibilityLabel(AppStrings.playbackPosition)
         progressSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        configureIconButton(volumeButton, symbolName: "speaker.wave.2.fill", tooltip: "Mute")
+        configureIconButton(volumeButton, symbolName: "speaker.wave.2.fill", tooltip: AppStrings.mute)
         volumeButton.action = #selector(volumeButtonPressed(_:))
 
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeSliderChanged(_:))
         volumeSlider.isContinuous = true
         volumeSlider.doubleValue = playerController.playbackVolume
-        volumeSlider.toolTip = "Scroll to adjust volume"
+        volumeSlider.toolTip = AppStrings.adjustVolume
         volumeSlider.controlSize = .small
         volumeSlider.trackFillColor = AppTheme.secondaryText
-        volumeSlider.setAccessibilityLabel("Volume")
+        volumeSlider.setAccessibilityLabel(AppStrings.volume)
 
         volumeContainer.orientation = .horizontal
         volumeContainer.alignment = .centerY
@@ -463,6 +480,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         titlebar.addSubview(titleSubtitleLabel)
         titlebar.addSubview(titleFolderButton)
         titlebar.addSubview(titleOpenButton)
+        titlebar.addSubview(playlistToggleButton)
 
         playerSurface.addSubview(playerView)
         playerSurface.addSubview(mpvPlayerView)
@@ -478,6 +496,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
 
         registerForDraggedTypes([.fileURL])
         playerController.setMPVVideoView(mpvPlayerView)
+        newTagField.delegate = self
         playerController.onItemChanged = { [weak self] in
             self?.updateEmptyState()
             self?.updateProgress()
@@ -485,6 +504,10 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             self?.updatePlaylist()
         }
         playerController.onPlaybackProgressed = { [weak self] in
+            self?.updateProgress()
+        }
+        playerController.onPlaybackStateChanged = { [weak self] in
+            self?.updateEmptyState()
             self?.updateProgress()
         }
         playerController.onPlaybackModeChanged = { [weak self] in
@@ -504,6 +527,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         playerController.onScreenshotSaved = { [weak self] url in
             self?.showScreenshotToast(for: url)
         }
+        applyLanguage()
         installTimeObserver()
         updateEmptyState()
         updateTagControls()
@@ -515,7 +539,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     internal static func configureTagInputField(_ field: NSTextField) {
-        field.placeholderString = "New tag"
+        field.placeholderString = AppStrings.newTag
         field.isEditable = true
         field.isSelectable = true
         field.usesSingleLineMode = true

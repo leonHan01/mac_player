@@ -66,12 +66,11 @@ final class PlaylistCellView: NSTableCellView {
     func configure(url: URL, index: Int, isCurrent: Bool) {
         nameLabel.stringValue = url.deletingPathExtension().lastPathComponent
         nameLabel.textColor = isCurrent ? AppTheme.primaryBlue : AppTheme.text
-        detailLabel.stringValue = "\(String(format: "%02d", index + 1))  ·  \(url.pathExtension.uppercased())"
-            + (isCurrent ? "  ·  Current video" : "")
+        detailLabel.stringValue = AppStrings.playlistDetail(index: index, fileExtension: url.pathExtension.uppercased(), isCurrent: isCurrent)
         detailLabel.textColor = isCurrent ? AppTheme.primaryBlue : AppTheme.secondaryText
         fileIcon.contentTintColor = isCurrent ? AppTheme.primaryBlue : AppTheme.secondaryText
         iconBackground.layer?.backgroundColor = (isCurrent ? AppTheme.panelBackground : AppTheme.barBackground).cgColor
         toolTip = url.path
-        setAccessibilityLabel("\(url.lastPathComponent)\(isCurrent ? ", current video" : "")")
+        setAccessibilityLabel(AppStrings.playlistAccessibilityName(url.lastPathComponent, isCurrent: isCurrent))
     }
 }

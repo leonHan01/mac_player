@@ -55,9 +55,11 @@ def main():
         fake = scratch / "fake-mpv.dylib"
         run(["clang", "-dynamiclib", str(root / "Tests/Fixtures/fake-mpv.c"), "-o", str(fake)])
         runner = scratch / "regressions"
+        checks = sorted(str(p) for p in (root / "Tests/RegressionChecks").glob("*.swift")
+                        if not p.name.startswith("._"))
         run(["swiftc", *common, "-parse-as-library", "-I", str(scratch), "-L", str(scratch),
              "-lMacVideoPlayer", "-Xlinker", "-rpath", "-Xlinker", str(scratch),
-             str(root / "Tests/RegressionChecks/main.swift"), "-o", str(runner)])
+             *checks, "-o", str(runner)])
         print(run([str(runner), str(fake), str(scratch / "fixtures")]), end="", flush=True)
 
 

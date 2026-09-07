@@ -21,7 +21,7 @@ enum MPVPlaybackError: LocalizedError {
              .screenshotFailed(let message):
             message
         case .noActiveVideo:
-            "Open a video before capturing a screenshot."
+            AppStrings.noActiveVideoForScreenshot
         }
     }
 }
@@ -241,6 +241,7 @@ final class MPVPlayback: NSObject {
     var duration: Double { cachedDuration }
     var volume: Double { desiredVolume }
     var isMuted: Bool { desiredMuted }
+    var schedulesProgressUpdates: Bool { progressTimer != nil }
 
     /// Prepare libmpv before the first file is selected. This avoids decoder
     /// and shader startup work being visible as the first-open delay.
@@ -271,7 +272,7 @@ final class MPVPlayback: NSObject {
         cachedTime = 0
         cachedDuration = 0
         cachedPaused = false
-        startProgressTimer()
+        updateProgressTimer()
         scheduleRequestedLoad()
         onStateChanged?()
     }
@@ -302,13 +303,16 @@ final class MPVPlayback: NSObject {
 
     func play() {
         cachedPaused = false
+        updateProgressTimer()
         sendCommand(["set", "pause", "no"])
         onStateChanged?()
     }
 
     func pause() {
         cachedPaused = true
+        updateProgressTimer()
         sendCommand(["set", "pause", "yes"])
+        onProgressUpdated?()
         onStateChanged?()
     }
 
@@ -586,38 +590,59 @@ final class MPVPlayback: NSObject {
             guard hasLoadedMedia, activeLoad?.generation == requestedLoad?.generation else { return }
             let number = property.format == 5 ? property.data?.load(as: Double.self) : nil
             let value = number.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 0
-            if String(cString: name) == "time-pos" { cachedTime = value } else { cachedDuration = value }
+            let isTime = String(cString: name) == "time-pos"
+            let changed = value != (isTime ? cachedTime : cachedDuration)
+            if isTime { cachedTime = value } else { cachedDuration = value }
+            // Paused seeks still update the timeline without a polling timer.
+            if changed, !isPlaying { onProgressUpdated?() }
         case "pause":
             guard property.format == 3, let data = property.data else { return }
-            cachedPaused = data.load(as: Int32.self) != 0
-            onStateChanged?()
+            let paused = data.load(as: Int32.self) != 0
+            let changed = cachedPaused != paused
+            cachedPaused = paused
+            updateProgressTimer()
+            if changed {
+                onProgressUpdated?()
+                onStateChanged?()
+            }
         case "volume":
             guard property.format == 5, let data = property.data else { return }
             let value = data.load(as: Double.self)
             guard value.isFinite else { return }
-            desiredVolume = min(max(value / 100, 0), 1)
+            let volume = min(max(value / 100, 0), 1)
+            guard desiredVolume != volume else { return }
+            desiredVolume = volume
             onStateChanged?()
         case "mute":
             guard property.format == 3, let data = property.data else { return }
-            desiredMuted = data.load(as: Int32.self) != 0
+            let muted = data.load(as: Int32.self) != 0
+            guard desiredMuted != muted else { return }
+            desiredMuted = muted
             onStateChanged?()
         default:
             break
         }
     }
 
-    private func startProgressTimer() {
-        progressTimer?.invalidate()
+    private func updateProgressTimer() {
+        guard isPlaying else {
+            progressTimer?.invalidate()
+            progressTimer = nil
+            return
+        }
+        guard progressTimer == nil else { return }
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollPlaybackState()
             }
         }
+        timer.tolerance = 0.05
         RunLoop.main.add(timer, forMode: .common)
         progressTimer = timer
     }
 
     private func pollPlaybackState() {
+        guard isPlaying else { return }
         onProgressUpdated?()
     }
 

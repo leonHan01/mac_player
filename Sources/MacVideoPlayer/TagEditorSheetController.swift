@@ -110,21 +110,21 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
     private var tags: [String]
     private let suggestedTags: [String]
 
-    private let titleLabel = NSTextField(labelWithString: "Edit tags")
-    private let subtitleLabel = NSTextField(labelWithString: "Keep this video easy to find later.")
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
     private let fileNameLabel = NSTextField(labelWithString: "")
     private let fileDetailLabel = NSTextField(labelWithString: "")
-    private let inputLabel = NSTextField(labelWithString: "Add tags")
+    private let inputLabel = NSTextField(labelWithString: "")
     private let tagInput = NSTextField()
-    private let addButton = NSButton(title: "Add", target: nil, action: nil)
-    private let currentTagsLabel = NSTextField(labelWithString: "Current tags")
+    private let addButton = NSButton(title: "", target: nil, action: nil)
+    private let currentTagsLabel = NSTextField(labelWithString: "")
     private let tagCountLabel = NSTextField(labelWithString: "")
-    private let emptyTagsLabel = NSTextField(labelWithString: "No tags yet. Add one above to organize this video.")
+    private let emptyTagsLabel = NSTextField(labelWithString: "")
     private let currentTagsFlowView = TagFlowView()
-    private let suggestedTagsLabel = NSTextField(labelWithString: "Suggestions")
+    private let suggestedTagsLabel = NSTextField(labelWithString: "")
     private let suggestedTagsFlowView = TagFlowView()
-    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-    private let saveButton = NSButton(title: "Save changes", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "", target: nil, action: nil)
+    private let saveButton = NSButton(title: "", target: nil, action: nil)
 
     private var completion: (([String]?) -> Void)?
 
@@ -139,7 +139,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.title = "Edit Tags"
+        panel.title = AppStrings.editTags
         panel.appearance = NSAppearance(named: .aqua)
         panel.backgroundColor = AppTheme.windowBackground
         panel.isReleasedWhenClosed = false
@@ -149,7 +149,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         super.init(window: panel)
         panel.delegate = self
         configureContent(in: panel)
-        renderTags()
+        applyLanguage()
     }
 
     required init?(coder: NSCoder) {
@@ -172,6 +172,25 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         dismiss(with: .cancel)
         return false
+    }
+
+    func applyLanguage() {
+        window?.title = AppStrings.editTags
+        titleLabel.stringValue = AppStrings.editTags
+        subtitleLabel.stringValue = AppStrings.editTagsSubtitle
+        fileDetailLabel.stringValue = AppStrings.localTagsNotice
+        inputLabel.stringValue = AppStrings.addTags
+        tagInput.placeholderString = AppStrings.tagEntryPlaceholder
+        addButton.title = AppStrings.add
+        stylePrimaryButton(addButton)
+        currentTagsLabel.stringValue = AppStrings.currentTags
+        emptyTagsLabel.stringValue = AppStrings.noTagsYet
+        suggestedTagsLabel.stringValue = AppStrings.suggestions
+        cancelButton.title = AppStrings.cancel
+        styleSecondaryButton(cancelButton)
+        saveButton.title = AppStrings.saveChanges
+        stylePrimaryButton(saveButton)
+        renderTags()
     }
 
     private func configureContent(in panel: NSPanel) {
@@ -208,7 +227,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         fileNameLabel.maximumNumberOfLines = 1
         fileNameLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        fileDetailLabel.stringValue = "Tags are saved locally. The video file is not changed."
+        fileDetailLabel.stringValue = AppStrings.localTagsNotice
         fileDetailLabel.font = .systemFont(ofSize: 13, weight: .regular)
         fileDetailLabel.textColor = AppTheme.secondaryText
         fileDetailLabel.lineBreakMode = .byTruncatingTail
@@ -223,7 +242,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         inputLabel.textColor = AppTheme.text
         inputLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        tagInput.placeholderString = "Type a tag, or separate several with commas"
+        tagInput.placeholderString = AppStrings.tagEntryPlaceholder
         tagInput.font = .systemFont(ofSize: 14, weight: .regular)
         tagInput.textColor = AppTheme.text
         tagInput.backgroundColor = AppTheme.controlBackground
@@ -438,7 +457,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
     }
 
     private func renderTags() {
-        tagCountLabel.stringValue = tags.count == 1 ? "1 tag" : "\(tags.count) tags"
+        tagCountLabel.stringValue = AppStrings.tagCount(tags.count)
         emptyTagsLabel.isHidden = !tags.isEmpty
         currentTagsFlowView.isHidden = tags.isEmpty
         currentTagsFlowView.replaceItems(with: tags.map { tag in

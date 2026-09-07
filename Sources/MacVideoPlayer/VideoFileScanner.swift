@@ -2,10 +2,13 @@ import Foundation
 
 struct PlaylistLoadResult: Sendable {
     let requestedURL: URL
-    let urls: [URL]
     let startURL: URL
     let startsAtFirstVideo: Bool
     let fileSizes: [URL: Int64]
+    let playlistsBySortMode: [SortMode: [URL]]
+    let sortMode: SortMode
+
+    var urls: [URL] { playlistsBySortMode[sortMode] ?? [] }
 }
 
 private struct VideoFileScan {
@@ -14,64 +17,86 @@ private struct VideoFileScan {
 }
 
 enum VideoFileScanner {
-    static func buildLoadResult(for url: URL, sortMode: SortMode) throws -> PlaylistLoadResult {
-        if try isDirectory(url) {
+    static func buildLoadResult(
+        for url: URL,
+        sortMode: SortMode,
+        checkCancellation: () throws -> Void = { try Task.checkCancellation() }
+    ) throws -> PlaylistLoadResult {
+        try checkCancellation()
+        let isFolder = try isDirectory(url)
+        if isFolder {
             guard FileManager.default.isReadableFile(atPath: url.path) else {
                 throw OpenVideoError.fileNotReadable
             }
-
-            let scan = try videoFiles(in: url, sortMode: sortMode)
-            guard let first = scan.urls.first else {
-                throw OpenVideoError.noPlayableFiles(url.lastPathComponent)
-            }
-
-            return PlaylistLoadResult(
-                requestedURL: url,
-                urls: scan.urls,
-                startURL: first,
-                startsAtFirstVideo: true,
-                fileSizes: scan.fileSizes
-            )
+        } else {
+            try validateFile(url: url)
         }
 
-        try validateFile(url: url)
-
-        let directoryURL = url.deletingLastPathComponent()
-        let scan = try videoFiles(in: directoryURL, sortMode: sortMode)
+        let directoryURL = isFolder ? url : url.deletingLastPathComponent()
+        let scan = try videoFiles(in: directoryURL, checkCancellation: checkCancellation)
         var videoURLs = scan.urls
         var fileSizes = scan.fileSizes
 
-        if !videoURLs.contains(where: { isSameFile($0, url) }) {
+        if !isFolder, !videoURLs.contains(where: { isSameFile($0, url) }) {
             videoURLs.append(url)
             fileSizes[url] = fileSize(url)
-            videoURLs = sorted(videoURLs, sortMode: sortMode, fileSizes: fileSizes)
         }
 
+        guard !videoURLs.isEmpty else {
+            throw OpenVideoError.noPlayableFiles(directoryURL.lastPathComponent)
+        }
+
+        // There are only two orders. Prepare both on the scan worker so a
+        // sort change (including one during loading) never sorts on the UI thread.
+        var playlistsBySortMode: [SortMode: [URL]] = [:]
+        for mode in SortMode.allCases {
+            playlistsBySortMode[mode] = try sorted(
+                videoURLs, sortMode: mode, fileSizes: fileSizes,
+                checkCancellation: checkCancellation
+            )
+        }
+        try checkCancellation()
+        guard let first = playlistsBySortMode[sortMode]?.first else {
+            throw OpenVideoError.noPlayableFiles(directoryURL.lastPathComponent)
+        }
         return PlaylistLoadResult(
             requestedURL: url,
-            urls: videoURLs,
-            startURL: url,
-            startsAtFirstVideo: false,
-            fileSizes: fileSizes
+            startURL: isFolder ? first : url,
+            startsAtFirstVideo: isFolder,
+            fileSizes: fileSizes,
+            playlistsBySortMode: playlistsBySortMode,
+            sortMode: sortMode
         )
     }
 
     static func sorted(
         _ urls: [URL],
         sortMode: SortMode,
-        fileSizes: [URL: Int64] = [:]
-    ) -> [URL] {
+        fileSizes: [URL: Int64] = [:],
+        checkCancellation: () throws -> Void = {}
+    ) rethrows -> [URL] {
+        try checkCancellation()
+        // Cache display names once instead of extracting them for every comparison.
+        let entries = try urls.map { url in
+            try checkCancellation()
+            return (url: url, name: url.lastPathComponent)
+        }
         switch sortMode {
         case .nameAscending:
-            urls.sorted { first, second in
-                first.lastPathComponent.localizedStandardCompare(second.lastPathComponent) == .orderedAscending
-            }
+            return try entries.sorted { first, second in
+                try checkCancellation()
+                return first.name.localizedStandardCompare(second.name) == .orderedAscending
+            }.map(\.url)
         case .sizeDescending:
-            urls
-                .map { url in (url: url, size: fileSizes[url] ?? fileSize(url)) }
+            return try entries
+                .map { entry in
+                    try checkCancellation()
+                    return (url: entry.url, name: entry.name, size: fileSizes[entry.url] ?? fileSize(entry.url))
+                }
                 .sorted { first, second in
+                    try checkCancellation()
                     if first.size == second.size {
-                        return first.url.lastPathComponent.localizedStandardCompare(second.url.lastPathComponent) == .orderedAscending
+                        return first.name.localizedStandardCompare(second.name) == .orderedAscending
                     }
 
                     return first.size > second.size
@@ -103,19 +128,34 @@ enum VideoFileScanner {
         }
     }
 
-    private static func videoFiles(in directoryURL: URL, sortMode: SortMode) throws -> VideoFileScan {
-        let urls = try FileManager.default.contentsOfDirectory(
+    private static func videoFiles(
+        in directoryURL: URL,
+        checkCancellation: () throws -> Void
+    ) throws -> VideoFileScan {
+        try checkCancellation()
+        var scanError: Error?
+        guard let enumerator = FileManager.default.enumerator(
             at: directoryURL,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey],
-            options: [.skipsHiddenFiles]
-        )
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants],
+            errorHandler: { _, error in
+                scanError = error
+                return false
+            }
+        ) else { throw CocoaError(.fileReadUnknown) }
 
-        let candidates = urls.compactMap(playableFileCandidate)
-        let fileSizes = Dictionary(uniqueKeysWithValues: candidates.map { ($0.url, $0.fileSize) })
-        return VideoFileScan(
-            urls: sorted(candidates.map(\.url), sortMode: sortMode, fileSizes: fileSizes),
-            fileSizes: fileSizes
-        )
+        var urls: [URL] = []
+        var fileSizes: [URL: Int64] = [:]
+        while true {
+            try checkCancellation()
+            guard let url = enumerator.nextObject() as? URL else { break }
+            if let candidate = playableFileCandidate(url) {
+                urls.append(candidate.url)
+                fileSizes[candidate.url] = candidate.fileSize
+            }
+        }
+        if let scanError { throw scanError }
+        return VideoFileScan(urls: urls, fileSizes: fileSizes)
     }
 
     private static func isDirectory(_ url: URL) throws -> Bool {

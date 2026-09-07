@@ -5,12 +5,12 @@ import Foundation
 @testable import MacVideoPlayer
 
 @MainActor
-private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else { fatalError(message) }
 }
 
 @MainActor
-private func settle() async {
+func settle() async {
     for _ in 0..<12 { await Task.yield() }
 }
 
@@ -49,27 +49,95 @@ private final class FakeMPV {
 }
 
 @main @MainActor
-private struct RegressionChecks {
+struct RegressionChecks {
     static func main() async throws {
         let libraryURL = URL(fileURLWithPath: CommandLine.arguments[1])
         let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try checkTagRecovery(root)
+        checkLanguageSettings(root)
+        checkPlaybackRefreshRouting()
+        try await checkTagRecovery(root)
         try await checkPlaylistMutations(root)
+        try await checkTagWritePerformance(root)
+        try await checkScanCancellation(root)
+        try await checkDeletionDuringLoading(root)
         try await checkTagInput(root)
+        checkArrowKeySeekAcceleration()
         checkCommandQueue()
         try await checkPlaybackEvents(libraryURL, root)
         print("PASS: tag protection, tag filtering, sort races, command ordering, EOF/replay, late events, screenshots")
     }
 
-    static func checkTagRecovery(_ root: URL) throws {
+    static func checkPlaybackRefreshRouting() {
+        let controller = PlayerController()
+        defer { controller.shutdown() }
+        var itemChanges = 0
+        var stateChanges = 0
+        controller.onItemChanged = { itemChanges += 1 }
+        controller.onPlaybackStateChanged = { stateChanges += 1 }
+        for _ in 0..<100 { controller.handleMPVPlaybackUpdate(.state) }
+        expect(itemChanges == 0, "Playback state changes must not rebuild library and tag UI")
+        expect(stateChanges == 100, "Playback controls must still receive state changes")
+    }
+
+    static func checkLanguageSettings(_ root: URL) {
+        let suiteName = "MacVideoPlayer.RegressionChecks.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            fatalError("Unable to create isolated language defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = LanguageSettings(defaults: defaults)
+        expect(settings.language == AppLanguage.systemDefault, "Unset language must follow the system default")
+        var notificationCount = 0
+        let observer = NotificationCenter.default.addObserver(
+            forName: LanguageSettings.didChangeNotification,
+            object: settings,
+            queue: nil
+        ) { _ in notificationCount += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let firstSelection: AppLanguage = settings.language == .simplifiedChinese ? .english : .simplifiedChinese
+        let secondSelection: AppLanguage = firstSelection == .simplifiedChinese ? .english : .simplifiedChinese
+        settings.select(firstSelection)
+        expect(settings.language == firstSelection, "The selected language must persist")
+        expect(LanguageSettings(defaults: defaults).language == firstSelection,
+               "The persisted language must be restored by a new settings instance")
+        settings.select(firstSelection)
+        expect(notificationCount == 1, "Selecting the active language must not refresh the UI again")
+        settings.select(secondSelection)
+        expect(settings.language == secondSelection && notificationCount == 2,
+               "Changing to the other supported language must persist and notify the UI")
+        print("PASS: persisted English/Chinese language selection and change notifications")
+    }
+
+    static func checkArrowKeySeekAcceleration() {
+        var acceleration = ArrowKeySeekAcceleration()
+        expect(acceleration.seekMultiplier(for: 124, isRepeat: false, timestamp: 10) == 1,
+               "A new right-arrow press must use the normal seek step")
+        expect(acceleration.seekMultiplier(for: 124, isRepeat: true, timestamp: 14.99) == 1,
+               "Right-arrow repeats before five seconds must use the normal seek step")
+        expect(acceleration.seekMultiplier(for: 124, isRepeat: true, timestamp: 15.01)
+               == ArrowKeySeekAcceleration.acceleratedMultiplier,
+               "Holding right arrow for over five seconds must increase seeking by 150%")
+        acceleration.endHold(for: 124)
+        expect(acceleration.seekMultiplier(for: 124, isRepeat: false, timestamp: 20) == 1,
+               "Releasing and pressing again must reset right-arrow acceleration")
+        expect(acceleration.seekMultiplier(for: 123, isRepeat: false, timestamp: 30) == 1,
+               "A new left-arrow press must use the normal seek step")
+        expect(acceleration.seekMultiplier(for: 123, isRepeat: true, timestamp: 35.01)
+               == ArrowKeySeekAcceleration.acceleratedMultiplier,
+               "Holding left arrow for over five seconds must increase seeking by 150%")
+    }
+
+    static func checkTagRecovery(_ root: URL) async throws {
         let url = root.appendingPathComponent("damaged-tags.json")
         let original = Data("{\"/old.mp4\":[\"Keep\"],\"/bad.mp4\":42}".utf8)
         try original.write(to: url)
         let store = TagStore(storeURL: url)
         expect(store.loadError != nil, "Malformed store must report its read error")
         do {
-            try store.setTags(["New"], for: root.appendingPathComponent("new.mp4"))
+            try await store.setTags(["New"], for: root.appendingPathComponent("new.mp4"))
             fatalError("A failed store load must block writes")
         } catch is TagStoreError {}
         let preserved = try Data(contentsOf: url)
@@ -77,8 +145,8 @@ private struct RegressionChecks {
         let healthyURL = root.appendingPathComponent("healthy-tags.json")
         let healthy = TagStore(storeURL: healthyURL)
         let file = root.appendingPathComponent("example.mp4")
-        try healthy.setTags(["Review", "review", "Keep"], for: file)
-        try healthy.removeTag("keep", for: file)
+        try await healthy.setTags(["Review", "review", "Keep"], for: file)
+        try await healthy.removeTag("keep", for: file)
         expect(TagStore(storeURL: healthyURL).tags(for: file) == ["Review"], "Valid stores must still save and normalize tags")
     }
 
@@ -99,18 +167,18 @@ private struct RegressionChecks {
         try Data(repeating: 0, count: 1).write(to: small)
         try Data(repeating: 0, count: 20).write(to: large)
         let tags = TagStore(storeURL: root.appendingPathComponent("playlist-tags.json"))
-        try tags.setTags(["Keep"], for: small)
-        try tags.setTags(["Keep"], for: large)
+        try await tags.setTags(["Keep"], for: small)
+        try await tags.setTags(["Keep"], for: large)
         let controller = PlayerController()
         defer { controller.shutdown() }
         // No video view is attached: scanning and playlist state run without
         // initializing a decoder, touching media, or presenting a window.
         await load(controller, directory)
         try controller.applyTagFilter("Keep", tagStore: tags)
-        try tags.setTags([], for: small)
+        try await tags.setTags([], for: small)
         try controller.refreshAfterTagMutation(tagStore: tags)
         expect(controller.playlistURLs == [large], "Removing the active tag must remove the video from the filtered list")
-        try tags.setTags([], for: large)
+        try await tags.setTags([], for: large)
         try controller.refreshAfterTagMutation(tagStore: tags)
         expect(controller.activeTagFilter == nil && controller.playlistURLs.count == 2, "Removing the last matching tag must restore the full list")
         await load(controller, directory) { controller.toggleSortMode(tagStore: tags) }
@@ -123,6 +191,14 @@ private struct RegressionChecks {
     }
 
     static func checkTagInput(_ root: URL) async throws {
+        let attributes: [NSOpenGLPixelFormatAttribute] = [
+            UInt32(NSOpenGLPFAOpenGLProfile), UInt32(NSOpenGLProfileVersion3_2Core),
+            UInt32(NSOpenGLPFAAccelerated), UInt32(NSOpenGLPFADoubleBuffer), 0
+        ]
+        guard NSOpenGLPixelFormat(attributes: attributes) != nil else {
+            print("SKIP: hidden-window UI checks (OpenGL pixel format unavailable)")
+            return
+        }
         _ = NSApplication.shared
         let controller = PlayerController()
         defer { controller.shutdown() }
@@ -132,13 +208,20 @@ private struct RegressionChecks {
         let window = PlayerWindow(
             playerController: controller, tagStore: store,
             openFileAction: {}, openFolderAction: {}, previousAction: {}, nextAction: {},
-            playPauseAction: {}, sortAction: {}, seekForwardAction: {}, seekBackwardAction: {},
+            playPauseAction: {}, sortAction: {}, seekForwardAction: { _ in }, seekBackwardAction: { _ in },
             deleteAction: {}
         )
         // The window is never shown; the empty composition contains no media.
         controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
         let view = window.contentView as! PlayerView
         window.contentView?.layoutSubtreeIfNeeded()
+        let existingChip = view.currentTagsStack.arrangedSubviews.first!
+        controller.handleMPVPlaybackUpdate(.state)
+        expect(view.currentTagsStack.arrangedSubviews.first === existingChip,
+               "Playback state changes must not rebuild unchanged tag controls")
+        controller.refreshCurrentItem()
+        expect(view.currentTagsStack.arrangedSubviews.first === existingChip,
+               "Refreshing an unchanged item must reuse its tag controls")
         expect(view.newTagField.isEditable, "The actual tag combo box must be editable")
         expect(window.makeFirstResponder(view.newTagField), "Tag input must accept focus")
         guard let editor = view.newTagField.currentEditor() as? NSTextView else {
@@ -162,11 +245,16 @@ private struct RegressionChecks {
                "Playback updates must preserve input-method composition and focus")
         expect(editor.string == composition && editor.selectedRange() == selection,
                "Playback updates must preserve composed text and cursor position")
+        try await store.addTag("Saved elsewhere", for: controller.currentVideoURL!)
+        controller.refreshCurrentItem()
+        expect(editor.hasMarkedText() && editor.string == composition && editor.selectedRange() == selection,
+               "A completed background save must not disrupt a new IME composition")
         editor.unmarkText()
         editor.selectAll(nil)
         editor.insertText("旅行", replacementRange: NSRange(location: NSNotFound, length: 0))
         view.addTagButtonPressed(view.newTagField)
-        expect(store.tags(for: controller.currentVideoURL!) == ["旅行"], "Submitting a typed tag must save it")
+        await view.tagMutationTask?.value
+        expect(store.tags(for: controller.currentVideoURL!).contains("旅行"), "Submitting a typed tag must save it")
         expect(view.newTagField.stringValue.isEmpty, "Successful submission must clear the draft")
         expect(view.newTagField.currentEditor() == nil, "Successful submission must restore playback shortcuts")
         expect(window.makeFirstResponder(view.newTagField), "The user must be able to enter another tag")
@@ -239,14 +327,34 @@ private struct RegressionChecks {
         let commandsBeforeReads = fake.count()
         expect(engine.currentTime == 12 && engine.duration == 60 && engine.isPlaying, "Playback UI must use observed properties")
         expect(fake.count() == commandsBeforeReads, "Reading UI state must not send work to mpv")
+        expect(engine.schedulesProgressUpdates, "Playing media must schedule progress updates")
+        engine.pause()
+        expect(!engine.schedulesProgressUpdates, "Pausing must remove the progress timer immediately")
+        await fake.finishCommands()
+        var pausedProgressUpdates = 0
+        engine.onProgressUpdated = { pausedProgressUpdates += 1 }
+        fake.property("time-pos", 22, 5)
+        await settle()
+        expect(engine.currentTime == 22 && pausedProgressUpdates == 1,
+               "A paused seek must update progress through its property event")
+        fake.property("pause", 0, 3)
+        await settle()
+        expect(engine.schedulesProgressUpdates, "An external unpause must restart the timer")
+        fake.property("pause", 1, 3)
+        await settle()
+        expect(!engine.schedulesProgressUpdates, "An external pause must remove the timer")
+        engine.play()
+        expect(engine.schedulesProgressUpdates, "Resuming must restart the timer")
+        await fake.finishCommands()
+        let commandsBeforeSeeks = fake.count()
 
         for second in 0..<100 { engine.seek(to: Double(second)) }
-        expect(fake.count() == commandsBeforeReads + 1, "A slider drag must leave the main actor responsive")
+        expect(fake.count() == commandsBeforeSeeks + 1, "A slider drag must leave the main actor responsive")
         fake.reply(0)
         await settle()
         expect(String(cString: fake.argument(1)) == "99.0", "Queued seeks must coalesce to the most recent target")
         await fake.finishCommands()
-        expect(fake.count() == commandsBeforeReads + 2, "A slider drag must not accumulate a command backlog")
+        expect(fake.count() == commandsBeforeSeeks + 2, "A slider drag must not accumulate a command backlog")
 
         var saved: [URL] = []
         let screenshot1 = Task { saved.append(try await engine.captureScreenshot()) }
@@ -269,6 +377,7 @@ private struct RegressionChecks {
         fake.end(12, 0)
         await settle()
         expect(endings == 1 && !engine.isActive, "Final EOF must leave playback inactive")
+        expect(!engine.schedulesProgressUpdates, "EOF must remove the progress timer")
         expect(PlayerController.shouldStartPlayback(requestedIndex: 0, currentIndex: 0, isActive: engine.isActive), "The selected row must be replayable after EOF")
         fake.end(12, 0)
         await settle()
@@ -294,6 +403,7 @@ private struct RegressionChecks {
         let cancelledScreenshot = Task { try await engine.captureScreenshot() }
         await settle()
         engine.shutdown()
+        expect(!engine.schedulesProgressUpdates, "Shutdown must remove the progress timer")
         do { _ = try await cancelledScreenshot.value; fatalError("Shutdown must cancel pending screenshots") }
         catch is MPVPlaybackError {}
     }
