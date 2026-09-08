@@ -58,6 +58,11 @@ struct RegressionChecks {
         checkPlaybackRefreshRouting()
         try await checkTagRecovery(root)
         try await checkPlaylistMutations(root)
+        try checkPlaylistStateLoading(root)
+        try checkPlaylistStateFiltering(root)
+        try checkPlaylistStateNavigation(root)
+        try checkPlaylistStateDeletion(root)
+        try await checkLibraryActions(root)
         try await checkTagWritePerformance(root)
         try await checkScanCancellation(root)
         try await checkDeletionDuringLoading(root)
@@ -206,8 +211,10 @@ struct RegressionChecks {
         // Load the playlist before attaching a video view so no decoder starts.
         await load(controller, root.appendingPathComponent("videos", isDirectory: true))
         let store = TagStore(storeURL: root.appendingPathComponent("input-tags.json"))
+        let actions = LibraryActions(playerController: controller, tagStore: store)
         let window = PlayerWindow(
             playerController: controller, tagStore: store,
+            libraryActions: actions,
             openFileAction: {}, openFolderAction: {}, previousAction: {}, nextAction: {},
             playPauseAction: {}, sortAction: {}, seekForwardAction: { _ in }, seekBackwardAction: { _ in },
             deleteAction: {}
@@ -254,7 +261,7 @@ struct RegressionChecks {
         editor.selectAll(nil)
         editor.insertText("旅行", replacementRange: NSRange(location: NSNotFound, length: 0))
         view.addTagButtonPressed(view.newTagField)
-        await view.tagMutationTask?.value
+        _ = await actions.waitForPendingOperations()
         expect(store.tags(for: controller.currentVideoURL!).contains("旅行"), "Submitting a typed tag must save it")
         expect(view.newTagField.stringValue.isEmpty, "Successful submission must clear the draft")
         expect(view.newTagField.currentEditor() == nil, "Successful submission must restore playback shortcuts")

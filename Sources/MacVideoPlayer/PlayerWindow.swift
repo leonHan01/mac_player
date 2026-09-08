@@ -43,6 +43,7 @@ final class PlayerWindow: NSWindow {
     init(
         playerController: PlayerController,
         tagStore: TagStore,
+        libraryActions: LibraryActions,
         openFileAction: @escaping () -> Void,
         openFolderAction: @escaping () -> Void,
         previousAction: @escaping () -> Void,
@@ -78,6 +79,7 @@ final class PlayerWindow: NSWindow {
         let playerView = PlayerView(
             playerController: playerController,
             tagStore: tagStore,
+            libraryActions: libraryActions,
             openFileAction: openFileAction,
             openFolderAction: openFolderAction,
             previousAction: previousAction,

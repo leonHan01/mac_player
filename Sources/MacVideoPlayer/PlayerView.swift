@@ -106,6 +106,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let openFolderButton = NSButton(title: "Open Folder...", target: nil, action: nil)
     internal let playerController: PlayerController
     internal let tagStore: TagStore
+    internal let libraryActions: LibraryActions
     internal let openFileAction: () -> Void
     internal let openFolderAction: () -> Void
     internal let previousAction: () -> Void
@@ -125,7 +126,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal var cachedTagStoreRevision: UInt64?
     internal var cachedTagScopeRevision: UInt64?
     internal var cachedAvailableTags: [String] = []
-    internal var tagMutationTask: Task<Void, Never>?
+    internal var isUpdatingTags = false
     internal var accumulatedScrollDeltaY: CGFloat = 0
     internal var lastWheelNavigationTime: TimeInterval = 0
     internal var screenshotToastDismissWorkItem: DispatchWorkItem?
@@ -143,6 +144,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     init(
         playerController: PlayerController,
         tagStore: TagStore,
+        libraryActions: LibraryActions,
         openFileAction: @escaping () -> Void,
         openFolderAction: @escaping () -> Void,
         previousAction: @escaping () -> Void,
@@ -151,6 +153,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     ) {
         self.playerController = playerController
         self.tagStore = tagStore
+        self.libraryActions = libraryActions
         self.openFileAction = openFileAction
         self.openFolderAction = openFolderAction
         self.previousAction = previousAction

@@ -71,7 +71,7 @@ extension PlayerView {
     }
 
     @objc internal func addTagButtonPressed(_ sender: Any?) {
-        guard tagMutationTask == nil else { return }
+        guard !isUpdatingTags else { return }
         guard let url = playerController.currentVideoURL else {
             NSSound.beep()
             return
@@ -86,26 +86,25 @@ extension PlayerView {
         newTagField.stringValue = ""
         restorePlaybackShortcutFocus()
         addTagButton.isEnabled = false
-        tagMutationTask = Task { [self] in
+        isUpdatingTags = true
+        libraryActions.perform(.addTag(tag, to: url)) { [self] result in
             defer {
-                tagMutationTask = nil
+                isUpdatingTags = false
                 addTagButton.isEnabled = true
             }
-            do {
-                try await tagStore.addTag(tag, for: url)
-                refreshAfterTagMutation()
-            } catch {
-                if playerController.currentVideoURL == url,
+            if case let .failure(failure) = result {
+                if case .mutation = failure,
+                   playerController.currentVideoURL == url,
                    newTagField.stringValue.isEmpty, newTagField.currentEditor() == nil {
                     newTagField.stringValue = tag
                 }
-                presentTagError(error)
+                presentTagError(failure.underlyingError)
             }
         }
     }
 
     @objc internal func removeTagButtonPressed(_ sender: NSButton) {
-        guard tagMutationTask == nil else { return }
+        guard !isUpdatingTags else { return }
         guard
             let tagButton = sender as? TagChipButton,
             let url = playerController.currentVideoURL
@@ -114,22 +113,12 @@ extension PlayerView {
         }
 
         let tag = tagButton.tagValue
-        tagMutationTask = Task { [self] in
-            defer { tagMutationTask = nil }
-            do {
-                try await tagStore.removeTag(tag, for: url)
-                refreshAfterTagMutation()
-            } catch {
-                presentTagError(error)
+        isUpdatingTags = true
+        libraryActions.perform(.removeTag(tag, from: url)) { [self] result in
+            defer { isUpdatingTags = false }
+            if case let .failure(failure) = result {
+                presentTagError(failure.underlyingError)
             }
-        }
-    }
-
-    internal func refreshAfterTagMutation() {
-        do {
-            try playerController.refreshAfterTagMutation(tagStore: tagStore)
-        } catch {
-            presentTagError(error)
         }
     }
 

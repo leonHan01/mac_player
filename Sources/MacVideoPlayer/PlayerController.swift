@@ -19,13 +19,7 @@ final class PlayerController {
     var onRendererChanged: ((Bool) -> Void)?
     var onScreenshotSaved: ((URL) -> Void)?
 
-    private var playlistsBySortMode: [SortMode: [URL]] = [:]
-    private var sourcePlaylist: [URL] { playlistsBySortMode[sortMode] ?? [] }
-    private var playlist: [URL] = []
-    private(set) var playlistScopeRevision: UInt64 = 0
-    private(set) var playlistRevision: UInt64 = 0
-    private var currentIndex = 0
-    private var playbackHistory: [Int] = []
+    private var playlistState = PlaylistState()
     private var activeLoadID: UUID?
     private var scanTask: Task<PlaylistLoadResult, Error>?
     private var removedPathsDuringScan = Set<String>()
@@ -34,9 +28,6 @@ final class PlayerController {
     private weak var mpvVideoView: MPVVideoView?
     private let mpvPlayback = MPVPlayback()
 
-    private(set) var playbackMode: PlaybackMode = .sequential
-    private(set) var sortMode: SortMode = .nameAscending
-    private(set) var activeTagFilter: String?
     private(set) var isLoading = false
     private(set) var loadingMessage = AppStrings.loadingVideos
 
@@ -75,58 +66,30 @@ final class PlayerController {
         }
     }
 
-    var hasPrevious: Bool {
-        switch playbackMode {
-        case .sequential:
-            playlist.indices.contains(currentIndex - 1)
-        case .shuffle:
-            !playbackHistory.isEmpty
-        }
-    }
-
-    var hasNext: Bool {
-        switch playbackMode {
-        case .sequential:
-            playlist.indices.contains(currentIndex + 1)
-        case .shuffle:
-            playlist.count > 1
-        }
-    }
-
-    var currentVideoURL: URL? {
-        guard playlist.indices.contains(currentIndex) else {
-            return nil
-        }
-
-        return playlist[currentIndex]
-    }
-
-    var playlistURLs: [URL] {
-        playlist
-    }
-
-    var currentPlaylistIndex: Int? {
-        guard playlist.indices.contains(currentIndex) else {
-            return nil
-        }
-
-        return currentIndex
-    }
+    var hasPrevious: Bool { playlistState.hasPrevious }
+    var hasNext: Bool { playlistState.hasNext }
+    var currentVideoURL: URL? { playlistState.currentURL }
+    var playlistURLs: [URL] { playlistState.urls }
+    var currentPlaylistIndex: Int? { playlistState.currentIndex }
+    var playlistScopeURLs: [URL] { playlistState.scopeURLs }
+    var playlistScopeRevision: UInt64 { playlistState.scopeRevision }
+    var playlistRevision: UInt64 { playlistState.revision }
+    var playbackMode: PlaybackMode { playlistState.playbackMode }
+    var sortMode: SortMode { playlistState.sortMode }
+    var activeTagFilter: String? { playlistState.activeTagFilter }
 
     var windowTitle: String {
         if isLoading {
             return AppStrings.loadingWindowTitle
         }
 
-        guard let currentVideoURL else {
+        guard let currentVideoURL, let currentPlaylistIndex else {
             return AppStrings.appName
         }
 
-        return AppStrings.playerWindowTitle(index: currentIndex, count: playlist.count, filename: currentVideoURL.lastPathComponent)
-    }
-
-    var playlistScopeURLs: [URL] {
-        sourcePlaylist
+        return AppStrings.playerWindowTitle(
+            index: currentPlaylistIndex, count: playlistURLs.count, filename: currentVideoURL.lastPathComponent
+        )
     }
 
     var hasActivePlayback: Bool {
@@ -134,7 +97,7 @@ final class PlayerController {
     }
 
     var hasPlaylist: Bool {
-        !playlist.isEmpty
+        !playlistState.urls.isEmpty
     }
 
     var playbackCurrentTime: Double {
@@ -202,29 +165,6 @@ final class PlayerController {
         }
     }
 
-    private func loadPlaylist(
-        _ urls: [URL],
-        startingAt startURL: URL,
-        playlistsBySortMode: [SortMode: [URL]]
-    ) throws {
-        guard !urls.isEmpty else {
-            throw OpenVideoError.noPlayableFiles("(empty selection)")
-        }
-
-        guard let startIndex = urls.firstIndex(where: { VideoFileScanner.isSameFile($0, startURL) }) else {
-            throw OpenVideoError.fileMissing
-        }
-
-        self.playlistsBySortMode = playlistsBySortMode
-        playlistScopeRevision &+= 1
-        playlist = urls
-        playlistRevision &+= 1
-        currentIndex = startIndex
-        activeTagFilter = nil
-        playbackHistory.removeAll()
-        play(url: urls[startIndex])
-    }
-
     private func finishLoad(_ result: PlaylistLoadResult, loadID: UUID) {
         guard activeLoadID == loadID else { return }
 
@@ -232,15 +172,8 @@ final class PlayerController {
         resetLoadingState()
 
         do {
-            var orders = result.playlistsBySortMode
-            if !removedPaths.isEmpty {
-                orders = orders.mapValues { urls in
-                    urls.filter { !removedPaths.contains($0.standardizedFileURL.path) }
-                }
-            }
-            let urls = orders[sortMode] ?? []
-            let startURL = result.startsAtFirstVideo ? (urls.first ?? result.startURL) : result.startURL
-            try loadPlaylist(urls, startingAt: startURL, playlistsBySortMode: orders)
+            let selectedURL = try playlistState.load(result, excluding: removedPaths)
+            play(url: selectedURL)
         } catch {
             onLoadFailed?(result.requestedURL, error)
         }
@@ -265,115 +198,55 @@ final class PlayerController {
     }
 
     func playPrevious() {
-        let previousIndex: Int
-
-        switch playbackMode {
-        case .sequential:
-            previousIndex = currentIndex - 1
-        case .shuffle:
-            guard let historyIndex = playbackHistory.popLast() else { return }
-            previousIndex = historyIndex
-        }
-
-        guard playlist.indices.contains(previousIndex) else { return }
-
-        currentIndex = previousIndex
-        play(url: playlist[previousIndex])
+        guard let url = playlistState.previous() else { return }
+        play(url: url)
     }
 
     func playNext() {
-        let nextIndex: Int
-
-        switch playbackMode {
-        case .sequential:
-            nextIndex = currentIndex + 1
-        case .shuffle:
-            guard let randomIndex = randomNextIndex() else { return }
-            playbackHistory.append(currentIndex)
-            nextIndex = randomIndex
-        }
-
-        guard playlist.indices.contains(nextIndex) else { return }
-
-        currentIndex = nextIndex
-        play(url: playlist[nextIndex])
+        guard let url = playlistState.next() else { return }
+        play(url: url)
     }
 
     func play(at index: Int) {
-        guard playlist.indices.contains(index), Self.shouldStartPlayback(
-            requestedIndex: index,
-            currentIndex: currentIndex,
-            isActive: hasActivePlayback
-        ) else {
-            return
-        }
-
-        currentIndex = index
-        playbackHistory.removeAll()
-        play(url: playlist[index])
+        guard let currentIndex = playlistState.currentIndex,
+              Self.shouldStartPlayback(requestedIndex: index, currentIndex: currentIndex, isActive: hasActivePlayback),
+              let url = playlistState.select(at: index) else { return }
+        play(url: url)
     }
 
     func togglePlaybackMode() {
-        playbackMode = playbackMode == .sequential ? .shuffle : .sequential
-        playbackHistory.removeAll()
+        playlistState.togglePlaybackMode()
         onPlaybackModeChanged?()
         onItemChanged?()
     }
 
     func toggleSortMode(tagStore: TagStore) {
-        let previousSortMode = sortMode
-        sortMode = sortMode == .nameAscending ? .sizeDescending : .nameAscending
-        guard !playlist.isEmpty else {
-            onSortModeChanged?()
-            return
-        }
-
         do {
-            try rebuildPlaylist(tagStore: tagStore)
+            if let selection = try playlistState.toggleSortMode(matchingTag: tagMatcher(in: tagStore)) {
+                applyRebuiltSelection(selection)
+            }
         } catch {
-            sortMode = previousSortMode
             onItemChanged?()
         }
-
         onSortModeChanged?()
     }
 
     func applyTagFilter(_ tag: String?, tagStore: TagStore) throws {
-        let previousTagFilter = activeTagFilter
-        activeTagFilter = tag
-        do {
-            try rebuildPlaylist(tagStore: tagStore)
-        } catch {
-            activeTagFilter = previousTagFilter
-            throw error
+        let selection = try playlistState.applyTagFilter(tag, matchingTag: tagMatcher(in: tagStore))
+        applyRebuiltSelection(selection)
+    }
+
+    private func applyRebuiltSelection(_ selection: PlaylistState.RebuiltSelection) {
+        if selection.retainedCurrentVideo, hasActivePlayback {
+            onItemChanged?()
+        } else {
+            play(url: selection.url)
         }
     }
 
-    private func rebuildPlaylist(tagStore: TagStore) throws {
-        let previousURL = currentVideoURL
-        let filteredPlaylist = filteredSourcePlaylist(tagStore: tagStore)
-
-        guard !filteredPlaylist.isEmpty else {
-            throw OpenVideoError.noPlayableFiles(activeTagFilter.map { "tag \($0)" } ?? "(empty selection)")
-        }
-
-        playlist = filteredPlaylist
-        playlistRevision &+= 1
-        currentIndex = previousURL.flatMap { previousURL in
-            filteredPlaylist.firstIndex {
-                VideoFileScanner.isSameFile($0, previousURL)
-            }
-        } ?? 0
-        playbackHistory.removeAll()
-
-        if
-            let previousURL,
-            hasActivePlayback,
-            VideoFileScanner.isSameFile(playlist[currentIndex], previousURL)
-        {
-            onItemChanged?()
-        } else {
-            play(url: playlist[currentIndex])
+    private func tagMatcher(in tagStore: TagStore) -> (URL, String) -> Bool {
+        { url, tag in
+            tagStore.tags(for: url).contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
         }
     }
 
@@ -424,8 +297,8 @@ final class PlayerController {
             return
         }
 
-        if playlist.indices.contains(currentIndex) {
-            play(url: playlist[currentIndex])
+        if let currentVideoURL {
+            play(url: currentVideoURL)
             return
         }
 
@@ -480,40 +353,12 @@ final class PlayerController {
     }
 
     private func removeVideoFromPlaylist(at url: URL) {
-        let selectedURL = currentVideoURL
         stopPlaybackIfSelected(url)
-        for mode in SortMode.allCases {
-            playlistsBySortMode[mode]?.removeAll { VideoFileScanner.isSameFile($0, url) }
-        }
-        playlistScopeRevision &+= 1
-        guard let removedIndex = playlist.firstIndex(where: { VideoFileScanner.isSameFile($0, url) }) else {
+        if let successor = playlistState.remove(url) {
+            play(url: successor)
+        } else {
             onItemChanged?()
-            return
         }
-        playlist.remove(at: removedIndex)
-        playlistRevision &+= 1
-        playbackHistory = playbackHistory.compactMap { index in
-            if index == removedIndex {
-                return nil
-            }
-
-            return index > removedIndex ? index - 1 : index
-        }
-
-        if playlist.isEmpty {
-            currentIndex = 0
-            onItemChanged?()
-            return
-        }
-
-        if let selectedURL, !VideoFileScanner.isSameFile(selectedURL, url),
-           let index = playlist.firstIndex(where: { VideoFileScanner.isSameFile($0, selectedURL) }) {
-            currentIndex = index
-            onItemChanged?()
-            return
-        }
-        currentIndex = min(removedIndex, playlist.count - 1)
-        play(url: playlist[currentIndex])
     }
 
     private func play(url: URL) {
@@ -569,27 +414,6 @@ final class PlayerController {
 
     static func shouldStartPlayback(requestedIndex: Int, currentIndex: Int, isActive: Bool = false) -> Bool {
         requestedIndex != currentIndex || !isActive
-    }
-
-    private func randomNextIndex() -> Int? {
-        guard playlist.count > 1 else { return nil }
-
-        var nextIndex = Int.random(in: playlist.indices)
-        if nextIndex == currentIndex {
-            nextIndex = (nextIndex + 1) % playlist.count
-        }
-
-        return nextIndex
-    }
-
-    private func filteredSourcePlaylist(tagStore: TagStore) -> [URL] {
-        guard let activeTagFilter else { return sourcePlaylist }
-
-        return sourcePlaylist.filter { url in
-            tagStore.tags(for: url).contains {
-                $0.caseInsensitiveCompare(activeTagFilter) == .orderedSame
-            }
-        }
     }
 
     deinit {

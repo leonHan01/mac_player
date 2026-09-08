@@ -6,11 +6,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: PlayerWindow?
     private let playerController = PlayerController()
     private let tagStore = TagStore()
+    private lazy var libraryActions = LibraryActions(playerController: playerController, tagStore: tagStore)
     private let screenshotShortcutStore = ScreenshotShortcutStore()
     private var screenshotMenuItem: NSMenuItem?
     private var tagEditor: TagEditorSheetController?
-    private var tagSaveTask: Task<Void, Never>?
-    private var deleteTask: Task<Void, Never>?
+    private var isSavingTags = false
+    private var isDeletingVideo = false
     private var settingsWindow: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -29,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let playerWindow = PlayerWindow(
             playerController: playerController,
             tagStore: tagStore,
+            libraryActions: libraryActions,
             openFileAction: { [weak self] in
                 self?.openDocument(nil)
             },
@@ -79,16 +81,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let inputTask = (window?.contentView as? PlayerView)?.tagMutationTask
-        guard tagStore.pendingWriteCount > 0 || tagSaveTask != nil || deleteTask != nil || inputTask != nil else {
+        guard libraryActions.hasPendingOperations else {
             return .terminateNow
         }
         Task { [self] in
-            await inputTask?.value
-            await tagSaveTask?.value
-            await deleteTask?.value
-            await tagStore.waitForPendingWrites()
-            sender.reply(toApplicationShouldTerminate: tagStore.lastSaveError == nil)
+            let canTerminate = await libraryActions.waitForPendingOperations()
+            sender.reply(toApplicationShouldTerminate: canTerminate)
         }
         return .terminateLater
     }
@@ -212,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func editTags(_ sender: Any?) {
-        guard tagSaveTask == nil, deleteTask == nil else { return }
+        guard !isSavingTags, !isDeletingVideo else { return }
         guard let url = playerController.currentVideoURL, let window else {
             NSSound.beep()
             return
@@ -228,13 +226,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer { self?.tagEditor = nil }
             guard let self, let tags else { return }
 
-            self.tagSaveTask = Task {
-                defer { self.tagSaveTask = nil }
-                do {
-                    try await self.tagStore.setTags(tags, for: url)
-                    try self.playerController.refreshAfterTagMutation(tagStore: self.tagStore)
-                } catch {
-                    self.showTagError(error)
+            self.isSavingTags = true
+            self.libraryActions.perform(.setTags(tags, for: url)) { [self] result in
+                defer { self.isSavingTags = false }
+                if case let .failure(failure) = result {
+                    self.showTagError(failure.underlyingError)
                 }
             }
         }
@@ -281,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func deleteCurrentVideo(_ sender: Any?) {
-        guard deleteTask == nil else { return }
+        guard !isDeletingVideo else { return }
         guard let url = playerController.currentVideoURL else {
             NSSound.beep()
             return
@@ -296,12 +292,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        deleteTask = Task { [self] in
-            defer { deleteTask = nil }
-            do {
-                try await playerController.deleteVideo(at: url, tagStore: tagStore)
-            } catch {
-                showPlaybackError(for: url, error: error)
+        isDeletingVideo = true
+        libraryActions.perform(.deleteVideo(url)) { [self] result in
+            defer { isDeletingVideo = false }
+            if case let .failure(failure) = result {
+                showPlaybackError(for: url, error: failure.underlyingError)
             }
         }
     }
