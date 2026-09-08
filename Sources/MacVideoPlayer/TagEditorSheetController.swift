@@ -35,8 +35,7 @@ private final class TagEditorTokenButton: NSButton {
             ]
         )
 
-        let titleSize = title.size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 14)])
-        frame.size = NSSize(width: ceil(titleSize.width) + 24, height: 32)
+        frame.size = intrinsicContentSize
         setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.required, for: .horizontal)
     }
@@ -213,30 +212,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         subtitleLabel.textColor = AppTheme.secondaryText
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let fileCard = makeCard()
-        let fileIcon = NSImageView()
-        fileIcon.image = NSImage(systemSymbolName: "play.rectangle.fill", accessibilityDescription: nil)
-        fileIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-        fileIcon.contentTintColor = AppTheme.primaryBlue
-        fileIcon.translatesAutoresizingMaskIntoConstraints = false
-
-        fileNameLabel.stringValue = fileURL.lastPathComponent
-        fileNameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        fileNameLabel.textColor = AppTheme.text
-        fileNameLabel.lineBreakMode = .byTruncatingMiddle
-        fileNameLabel.maximumNumberOfLines = 1
-        fileNameLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        fileDetailLabel.stringValue = AppStrings.localTagsNotice
-        fileDetailLabel.font = .systemFont(ofSize: 13, weight: .regular)
-        fileDetailLabel.textColor = AppTheme.secondaryText
-        fileDetailLabel.lineBreakMode = .byTruncatingTail
-        fileDetailLabel.maximumNumberOfLines = 1
-        fileDetailLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        fileCard.addSubview(fileIcon)
-        fileCard.addSubview(fileNameLabel)
-        fileCard.addSubview(fileDetailLabel)
+        let fileCard = makeFileCard()
 
         inputLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         inputLabel.textColor = AppTheme.text
@@ -257,25 +233,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         addButton.action = #selector(addTag(_:))
         addButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let currentTagsCard = makeCard()
-        currentTagsLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        currentTagsLabel.textColor = AppTheme.text
-        currentTagsLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        tagCountLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        tagCountLabel.textColor = AppTheme.secondaryText
-        tagCountLabel.alignment = .right
-        tagCountLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        emptyTagsLabel.font = .systemFont(ofSize: 14, weight: .regular)
-        emptyTagsLabel.textColor = AppTheme.secondaryText
-        emptyTagsLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        let currentTagsScrollView = makeTagScrollView(documentView: currentTagsFlowView)
-        currentTagsCard.addSubview(currentTagsLabel)
-        currentTagsCard.addSubview(tagCountLabel)
-        currentTagsCard.addSubview(emptyTagsLabel)
-        currentTagsCard.addSubview(currentTagsScrollView)
+        let currentTagsCard = makeCurrentTagsCard()
 
         suggestedTagsLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         suggestedTagsLabel.textColor = AppTheme.text
@@ -332,19 +290,6 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
             fileCard.topAnchor.constraint(equalTo: headerIcon.bottomAnchor, constant: 22),
             fileCard.heightAnchor.constraint(equalToConstant: 64),
 
-            fileIcon.leadingAnchor.constraint(equalTo: fileCard.leadingAnchor, constant: 16),
-            fileIcon.centerYAnchor.constraint(equalTo: fileCard.centerYAnchor),
-            fileIcon.widthAnchor.constraint(equalToConstant: 24),
-            fileIcon.heightAnchor.constraint(equalToConstant: 24),
-
-            fileNameLabel.leadingAnchor.constraint(equalTo: fileIcon.trailingAnchor, constant: 12),
-            fileNameLabel.topAnchor.constraint(equalTo: fileCard.topAnchor, constant: 13),
-            fileNameLabel.trailingAnchor.constraint(equalTo: fileCard.trailingAnchor, constant: -16),
-
-            fileDetailLabel.leadingAnchor.constraint(equalTo: fileNameLabel.leadingAnchor),
-            fileDetailLabel.topAnchor.constraint(equalTo: fileNameLabel.bottomAnchor, constant: 4),
-            fileDetailLabel.trailingAnchor.constraint(equalTo: fileCard.trailingAnchor, constant: -16),
-
             inputLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 32),
             inputLabel.topAnchor.constraint(equalTo: fileCard.bottomAnchor, constant: 22),
 
@@ -362,21 +307,6 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
             currentTagsCard.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -32),
             currentTagsCard.topAnchor.constraint(equalTo: tagInput.bottomAnchor, constant: 18),
             currentTagsCard.heightAnchor.constraint(equalToConstant: 132),
-
-            currentTagsLabel.leadingAnchor.constraint(equalTo: currentTagsCard.leadingAnchor, constant: 16),
-            currentTagsLabel.topAnchor.constraint(equalTo: currentTagsCard.topAnchor, constant: 14),
-
-            tagCountLabel.trailingAnchor.constraint(equalTo: currentTagsCard.trailingAnchor, constant: -16),
-            tagCountLabel.centerYAnchor.constraint(equalTo: currentTagsLabel.centerYAnchor),
-
-            emptyTagsLabel.leadingAnchor.constraint(equalTo: currentTagsCard.leadingAnchor, constant: 16),
-            emptyTagsLabel.trailingAnchor.constraint(equalTo: currentTagsCard.trailingAnchor, constant: -16),
-            emptyTagsLabel.topAnchor.constraint(equalTo: currentTagsLabel.bottomAnchor, constant: 13),
-
-            currentTagsScrollView.leadingAnchor.constraint(equalTo: currentTagsCard.leadingAnchor, constant: 16),
-            currentTagsScrollView.trailingAnchor.constraint(equalTo: currentTagsCard.trailingAnchor, constant: -16),
-            currentTagsScrollView.topAnchor.constraint(equalTo: currentTagsLabel.bottomAnchor, constant: 10),
-            currentTagsScrollView.bottomAnchor.constraint(equalTo: currentTagsCard.bottomAnchor, constant: -14),
 
             suggestedTagsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 32),
             suggestedTagsLabel.topAnchor.constraint(equalTo: currentTagsCard.bottomAnchor, constant: 20),
@@ -400,6 +330,89 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
             saveButton.widthAnchor.constraint(equalToConstant: 122),
             saveButton.heightAnchor.constraint(equalToConstant: 36)
         ])
+    }
+
+    private func makeFileCard() -> NSView {
+        let card = makeCard()
+        let fileIcon = NSImageView()
+        fileIcon.image = NSImage(systemSymbolName: "play.rectangle.fill", accessibilityDescription: nil)
+        fileIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
+        fileIcon.contentTintColor = AppTheme.primaryBlue
+        fileIcon.translatesAutoresizingMaskIntoConstraints = false
+
+        fileNameLabel.stringValue = fileURL.lastPathComponent
+        fileNameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        fileNameLabel.textColor = AppTheme.text
+        fileNameLabel.lineBreakMode = .byTruncatingMiddle
+        fileNameLabel.maximumNumberOfLines = 1
+        fileNameLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        fileDetailLabel.stringValue = AppStrings.localTagsNotice
+        fileDetailLabel.font = .systemFont(ofSize: 13, weight: .regular)
+        fileDetailLabel.textColor = AppTheme.secondaryText
+        fileDetailLabel.lineBreakMode = .byTruncatingTail
+        fileDetailLabel.maximumNumberOfLines = 1
+        fileDetailLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(fileIcon)
+        card.addSubview(fileNameLabel)
+        card.addSubview(fileDetailLabel)
+
+        NSLayoutConstraint.activate([
+            fileIcon.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            fileIcon.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            fileIcon.widthAnchor.constraint(equalToConstant: 24),
+            fileIcon.heightAnchor.constraint(equalToConstant: 24),
+
+            fileNameLabel.leadingAnchor.constraint(equalTo: fileIcon.trailingAnchor, constant: 12),
+            fileNameLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 13),
+            fileNameLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+
+            fileDetailLabel.leadingAnchor.constraint(equalTo: fileNameLabel.leadingAnchor),
+            fileDetailLabel.topAnchor.constraint(equalTo: fileNameLabel.bottomAnchor, constant: 4),
+            fileDetailLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16)
+        ])
+        return card
+    }
+
+    private func makeCurrentTagsCard() -> NSView {
+        let card = makeCard()
+        currentTagsLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        currentTagsLabel.textColor = AppTheme.text
+        currentTagsLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        tagCountLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        tagCountLabel.textColor = AppTheme.secondaryText
+        tagCountLabel.alignment = .right
+        tagCountLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyTagsLabel.font = .systemFont(ofSize: 14, weight: .regular)
+        emptyTagsLabel.textColor = AppTheme.secondaryText
+        emptyTagsLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = makeTagScrollView(documentView: currentTagsFlowView)
+        card.addSubview(currentTagsLabel)
+        card.addSubview(tagCountLabel)
+        card.addSubview(emptyTagsLabel)
+        card.addSubview(scrollView)
+
+        NSLayoutConstraint.activate([
+            currentTagsLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            currentTagsLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+
+            tagCountLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            tagCountLabel.centerYAnchor.constraint(equalTo: currentTagsLabel.centerYAnchor),
+
+            emptyTagsLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            emptyTagsLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            emptyTagsLabel.topAnchor.constraint(equalTo: currentTagsLabel.bottomAnchor, constant: 13),
+
+            scrollView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            scrollView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            scrollView.topAnchor.constraint(equalTo: currentTagsLabel.bottomAnchor, constant: 10),
+            scrollView.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14)
+        ])
+        return card
     }
 
     private func makeCard() -> NSView {
@@ -524,12 +537,7 @@ final class TagEditorSheetController: NSWindowController, NSWindowDelegate {
         return tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-            .filter { tag in
-                let key = tag.lowercased()
-                guard !seen.contains(key) else { return false }
-                seen.insert(key)
-                return true
-            }
+            .filter { seen.insert($0.lowercased()).inserted }
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 }

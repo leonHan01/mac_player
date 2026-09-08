@@ -92,6 +92,52 @@ extension RegressionChecks {
         print("PASS: deletion while scanning, selection preservation, and cached-order invalidation")
     }
 
+    static func checkSelectionDuringDeletion(_ root: URL) async throws {
+        let folder = root.appendingPathComponent("selection-videos", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let first = folder.appendingPathComponent("a.mp4")
+        let second = folder.appendingPathComponent("b.mp4")
+        let third = folder.appendingPathComponent("c.mp4")
+        for url in [first, second, third] { try Data().write(to: url) }
+
+        let gate = OperationGate()
+        let controller = PlayerController(scan: {
+            try VideoFileScanner.buildLoadResult(for: $0, sortMode: $1)
+        }, trash: { url in
+            if url == first { try gate.block() }
+            try FileManager.default.moveItem(at: url, to: root.appendingPathComponent("selection-removed-" + url.lastPathComponent))
+        })
+        defer { controller.shutdown() }
+        let tags = TagStore(storeURL: root.appendingPathComponent("selection-tags.json"))
+        try await tags.setTags(["Keep"], for: third)
+        await load(controller, folder)
+
+        var starts = gate.started.makeAsyncIterator()
+        let deletion = Task { try await controller.deleteVideo(at: first, tagStore: tags) }
+        await starts.next()
+        controller.play(at: 2)
+        gate.release()
+        try await deletion.value
+        expect(controller.playlistURLs == [second, third] && controller.currentVideoURL == third,
+               "A selection made during file deletion must survive completion")
+        expect(controller.currentPlaylistIndex == 1 && tags.tags(for: third) == ["Keep"],
+               "Deleting the captured file must adjust the new selection's index and preserve its tags")
+        controller.toggleSortMode(tagStore: tags)
+        expect(controller.playlistScopeURLs == [second, third] && controller.currentVideoURL == third,
+               "Cached sort orders must exclude the deleted file without changing selection")
+
+        try await controller.deleteVideo(at: third, tagStore: tags)
+        expect(controller.currentVideoURL == second && controller.currentPlaylistIndex == 0,
+               "Deleting the selected last row must select the preceding video")
+        expect(tags.tags(for: third).isEmpty, "Deleting a tagged video must remove its tags")
+        try await controller.deleteVideo(at: second, tagStore: tags)
+        expect(!controller.hasPlaylist && controller.currentVideoURL == nil && controller.currentPlaylistIndex == nil,
+               "Deleting the final video must clear selection")
+        expect(!controller.hasNext && !controller.hasPrevious && controller.playlistScopeURLs.isEmpty,
+               "An empty playlist must clear navigation and cached source files")
+        print("PASS: selection changes during deletion, selected-row removal, and empty-playlist navigation")
+    }
+
     static func checkTagWritePerformance(_ root: URL) async throws {
         let url = root.appendingPathComponent("async-tags.json")
         let video = root.appendingPathComponent("async-video.mp4")

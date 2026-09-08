@@ -59,8 +59,8 @@ final class TagStore {
     }
 
     func tags(for url: URL) -> [String] {
-        if legacyKeyCount == 0 { return tagsByPath[key(for: url)] ?? [] }
-        return normalize(keys(for: url).flatMap { tagsByPath[$0] ?? [] })
+        if legacyKeyCount == 0 { return tagsByPath[pathKey(for: url)] ?? [] }
+        return normalize(recordKeys(for: url).flatMap { tagsByPath[$0] ?? [] })
     }
 
     func setTags(_ tags: [String], for url: URL) async throws {
@@ -120,52 +120,78 @@ final class TagStore {
                 pendingWriteCount -= 1
                 if pendingWriteCount == 0 { pendingWrite = nil }
             }
-            // Derive mutations after earlier writes commit: concurrent Add calls
-            // must not build snapshots from the same stale list of tags.
-            let normalizedTags = normalize(transform(tags(for: url)))
-            let fileKey = key(for: url)
-            let keysToReplace = keys(for: url)
-            let replacedLegacyCount = keysToReplace.filter {
-                $0.hasPrefix("file-id:") && tagsByPath[$0] != nil
-            }.count
-            let changed = normalizedTags != (tagsByPath[fileKey] ?? []) || replacedLegacyCount > 0
-            guard changed || afterSaving != nil else { return }
-            let snapshot = tagsByPath
-            let destination = storeURL
-            let writer = write
-            do {
-                let updated = try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<[String: [String]], Error>) in
-                    ioQueue.async {
-                        do {
-                            var updated = snapshot
-                            for key in keysToReplace { updated.removeValue(forKey: key) }
-                            if !normalizedTags.isEmpty { updated[fileKey] = normalizedTags }
-                            if changed { try writer(updated, destination) }
-                            do {
-                                try afterSaving?()
-                            } catch {
-                                if changed { try writer(snapshot, destination) }
-                                throw error
-                            }
-                            continuation.resume(returning: updated)
-                        } catch {
-                            continuation.resume(throwing: error)
-                        }
-                    }
-                }
-                tagsByPath = updated
-                legacyKeyCount -= replacedLegacyCount
-                cachedKeys.removeAll()
-                if changed { revision &+= 1 }
-                lastSaveError = nil
-            } catch {
-                lastSaveError = error
-                throw error
-            }
+            try await applyMutation(url: url, afterSaving: afterSaving, transform: transform)
         }
         pendingWrite = Task { _ = try? await operation.value }
         try await operation.value
+    }
+
+    private func applyMutation(
+        url: URL,
+        afterSaving: (@Sendable () throws -> Void)?,
+        transform: ([String]) -> [String]
+    ) async throws {
+        // Derive mutations after earlier writes commit: concurrent Add calls
+        // must not build snapshots from the same stale list of tags.
+        let normalizedTags = normalize(transform(tags(for: url)))
+        let pathKey = pathKey(for: url)
+        let keysToReplace = recordKeys(for: url)
+        let replacedLegacyCount = keysToReplace.filter {
+            $0.hasPrefix("file-id:") && tagsByPath[$0] != nil
+        }.count
+        let tagsChanged = normalizedTags != (tagsByPath[pathKey] ?? []) || replacedLegacyCount > 0
+        guard tagsChanged || afterSaving != nil else { return }
+
+        do {
+            let updatedRecords = try await persistTags(
+                normalizedTags,
+                for: pathKey,
+                replacing: keysToReplace,
+                tagsChanged: tagsChanged,
+                afterSaving: afterSaving
+            )
+            tagsByPath = updatedRecords
+            legacyKeyCount -= replacedLegacyCount
+            cachedKeys.removeAll()
+            if tagsChanged { revision &+= 1 }
+            lastSaveError = nil
+        } catch {
+            lastSaveError = error
+            throw error
+        }
+    }
+
+    private func persistTags(
+        _ normalizedTags: [String],
+        for pathKey: String,
+        replacing keysToReplace: Set<String>,
+        tagsChanged: Bool,
+        afterSaving: (@Sendable () throws -> Void)?
+    ) async throws -> [String: [String]] {
+        let snapshot = tagsByPath
+        let destination = storeURL
+        let writer = write
+
+        return try await withCheckedThrowingContinuation { continuation in
+            ioQueue.async {
+                do {
+                    var updatedRecords = snapshot
+                    for key in keysToReplace { updatedRecords.removeValue(forKey: key) }
+                    if !normalizedTags.isEmpty { updatedRecords[pathKey] = normalizedTags }
+                    if tagsChanged { try writer(updatedRecords, destination) }
+                    do {
+                        try afterSaving?()
+                    } catch {
+                        // Finish rollback before the next queued mutation can begin.
+                        if tagsChanged { try writer(snapshot, destination) }
+                        throw error
+                    }
+                    continuation.resume(returning: updatedRecords)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     private func normalize(_ tags: [String]) -> [String] {
@@ -185,12 +211,8 @@ final class TagStore {
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
-    private func key(for url: URL) -> String {
-        legacyPathKey(for: url)
-    }
-
-    private func keys(for url: URL) -> Set<String> {
-        let pathKey = legacyPathKey(for: url)
+    private func recordKeys(for url: URL) -> Set<String> {
+        let pathKey = pathKey(for: url)
         guard legacyKeyCount > 0 else {
             return [pathKey]
         }
@@ -222,7 +244,7 @@ final class TagStore {
         return "file-id:" + data.base64EncodedString()
     }
 
-    private func legacyPathKey(for url: URL) -> String {
+    private func pathKey(for url: URL) -> String {
         url.standardizedFileURL.path
     }
 }

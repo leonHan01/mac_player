@@ -61,6 +61,7 @@ struct RegressionChecks {
         try await checkTagWritePerformance(root)
         try await checkScanCancellation(root)
         try await checkDeletionDuringLoading(root)
+        try await checkSelectionDuringDeletion(root)
         try await checkTagInput(root)
         checkArrowKeySeekAcceleration()
         checkCommandQueue()

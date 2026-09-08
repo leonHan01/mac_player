@@ -29,6 +29,11 @@ enum MPVPlaybackError: LocalizedError {
 private struct MPVRenderParam {
     var type: Int32
     var data: UnsafeMutableRawPointer?
+
+    init(type: MPVRenderParameterType, data: UnsafeMutableRawPointer?) {
+        self.type = type.rawValue
+        self.data = data
+    }
 }
 
 private struct MPVOpenGLInitParams {
@@ -43,7 +48,34 @@ private struct MPVOpenGLFBO {
     var internalFormat: Int32
 }
 
-private let MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: Int32 = 12
+// Keep libmpv's C enum values named without changing the raw ABI fields.
+private enum MPVRenderParameterType: Int32 {
+    case end = 0
+    case apiType = 1
+    case openGLInitParams = 2
+    case openGLFBO = 3
+    case flipY = 4
+    case depth = 5
+    case blockForTargetTime = 12
+}
+
+private enum MPVPropertyFormat {
+    static let flag: Int32 = 3
+    static let double: Int32 = 5
+}
+
+private enum MPVEventID {
+    static let none: Int32 = 0
+    static let commandReply: Int32 = 5
+    static let startFile: Int32 = 6
+    static let endFile: Int32 = 7
+    static let propertyChange: Int32 = 22
+}
+
+private enum MPVEndFileReason {
+    static let endOfFile: Int32 = 0
+    static let error: Int32 = 4
+}
 
 private struct MPVPropertyEvent {
     var name: UnsafePointer<CChar>?
@@ -83,8 +115,6 @@ private typealias MPVGetOpenGLProcAddress = @convention(c) (
     UnsafeMutableRawPointer?,
     UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer?
-private typealias MPVWakeupCallback = @convention(c) (UnsafeMutableRawPointer?) -> Void
-private typealias MPVRenderUpdateCallback = @convention(c) (UnsafeMutableRawPointer?) -> Void
 
 /// libmpv may issue more than one render update before AppKit has processed
 /// the first display request. Keep at most one request queued on the main
@@ -110,96 +140,6 @@ final class MPVFrameRequestCoordinator: @unchecked Sendable {
 }
 
 private let mpvFrameRequestCoordinator = MPVFrameRequestCoordinator()
-
-private final class MPVRuntime {
-    typealias Create = @convention(c) () -> OpaquePointer?
-    typealias Initialize = @convention(c) (OpaquePointer?) -> Int32
-    typealias Destroy = @convention(c) (OpaquePointer?) -> Void
-    typealias SetOptionString = @convention(c) (
-        OpaquePointer?,
-        UnsafePointer<CChar>?,
-        UnsafePointer<CChar>?
-    ) -> Int32
-    typealias CommandAsync = @convention(c) (OpaquePointer?, UInt64, UnsafePointer<UnsafePointer<CChar>?>?) -> Int32
-    typealias ObserveProperty = @convention(c) (OpaquePointer?, UInt64, UnsafePointer<CChar>?, Int32) -> Int32
-    typealias SetWakeupCallback = @convention(c) (
-        OpaquePointer?,
-        MPVWakeupCallback?,
-        UnsafeMutableRawPointer?
-    ) -> Void
-    typealias WaitEvent = @convention(c) (OpaquePointer?, Double) -> UnsafeMutableRawPointer?
-    typealias RenderContextCreate = @convention(c) (
-        UnsafeMutableRawPointer?,
-        OpaquePointer?,
-        UnsafeMutableRawPointer?
-    ) -> Int32
-    typealias RenderContextFree = @convention(c) (OpaquePointer?) -> Void
-    typealias RenderContextSetUpdateCallback = @convention(c) (
-        OpaquePointer?,
-        MPVRenderUpdateCallback?,
-        UnsafeMutableRawPointer?
-    ) -> Void
-    typealias RenderContextRender = @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void
-
-    let handle: UnsafeMutableRawPointer
-    let create: Create
-    let initialize: Initialize
-    let destroy: Destroy
-    let setOptionString: SetOptionString
-    let commandAsync: CommandAsync
-    let observeProperty: ObserveProperty
-    let setWakeupCallback: SetWakeupCallback
-    let waitEvent: WaitEvent
-    let renderContextCreate: RenderContextCreate
-    let renderContextFree: RenderContextFree
-    let renderContextSetUpdateCallback: RenderContextSetUpdateCallback
-    let renderContextRender: RenderContextRender
-
-    init(libraryURL customLibraryURL: URL? = nil) throws {
-        guard let libraryURL = customLibraryURL ?? Bundle.main.privateFrameworksURL?.appendingPathComponent("libmpv.2.dylib") else {
-            throw MPVPlaybackError.runtimeMissing
-        }
-        guard FileManager.default.isReadableFile(atPath: libraryURL.path) else {
-            throw MPVPlaybackError.runtimeMissing
-        }
-
-        guard let handle = dlopen(libraryURL.path, RTLD_NOW | RTLD_GLOBAL) else {
-            let message = dlerror().map { String(cString: $0) } ?? "Unknown dynamic loader error."
-            throw MPVPlaybackError.runtimeLoadFailed(message)
-        }
-
-        self.handle = handle
-        do {
-            create = try MPVRuntime.symbol("mpv_create", from: handle)
-            initialize = try MPVRuntime.symbol("mpv_initialize", from: handle)
-            destroy = try MPVRuntime.symbol("mpv_destroy", from: handle)
-            setOptionString = try MPVRuntime.symbol("mpv_set_option_string", from: handle)
-            commandAsync = try MPVRuntime.symbol("mpv_command_async", from: handle)
-            observeProperty = try MPVRuntime.symbol("mpv_observe_property", from: handle)
-            setWakeupCallback = try MPVRuntime.symbol("mpv_set_wakeup_callback", from: handle)
-            waitEvent = try MPVRuntime.symbol("mpv_wait_event", from: handle)
-            renderContextCreate = try MPVRuntime.symbol("mpv_render_context_create", from: handle)
-            renderContextFree = try MPVRuntime.symbol("mpv_render_context_free", from: handle)
-            renderContextSetUpdateCallback = try MPVRuntime.symbol("mpv_render_context_set_update_callback", from: handle)
-            renderContextRender = try MPVRuntime.symbol("mpv_render_context_render", from: handle)
-        } catch {
-            dlclose(handle)
-            throw error
-        }
-    }
-
-    deinit {
-        dlclose(handle)
-    }
-
-    private static func symbol<T>(_ name: String, from handle: UnsafeMutableRawPointer) throws -> T {
-        guard let symbol = dlsym(handle, name) else {
-            throw MPVPlaybackError.runtimeLoadFailed("IINA/libmpv is missing the required symbol \(name).")
-        }
-
-        return unsafeBitCast(symbol, to: T.self)
-    }
-}
 
 @MainActor
 final class MPVPlayback: NSObject {
@@ -373,9 +313,9 @@ final class MPVPlayback: NSObject {
         let result = apiType.withUnsafeMutableBufferPointer { apiBuffer in
             withUnsafeMutablePointer(to: &openGLParameters) { openGLPointer in
                 var parameters = [
-                    MPVRenderParam(type: 1, data: UnsafeMutableRawPointer(apiBuffer.baseAddress!)),
-                    MPVRenderParam(type: 2, data: UnsafeMutableRawPointer(openGLPointer)),
-                    MPVRenderParam(type: 0, data: nil)
+                    MPVRenderParam(type: .apiType, data: UnsafeMutableRawPointer(apiBuffer.baseAddress!)),
+                    MPVRenderParam(type: .openGLInitParams, data: UnsafeMutableRawPointer(openGLPointer)),
+                    MPVRenderParam(type: .end, data: nil)
                 ]
                 return withUnsafeMutablePointer(to: &newContext) { contextPointer in
                     parameters.withUnsafeMutableBufferPointer { buffer in
@@ -457,11 +397,11 @@ final class MPVPlayback: NSObject {
                 withUnsafeMutablePointer(to: &depth) { depthPointer in
                     withUnsafeMutablePointer(to: &blockForTargetTime) { blockPointer in
                         var parameters = [
-                            MPVRenderParam(type: 3, data: UnsafeMutableRawPointer(fboPointer)),
-                            MPVRenderParam(type: 4, data: UnsafeMutableRawPointer(flipPointer)),
-                            MPVRenderParam(type: 5, data: UnsafeMutableRawPointer(depthPointer)),
-                            MPVRenderParam(type: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: UnsafeMutableRawPointer(blockPointer)),
-                            MPVRenderParam(type: 0, data: nil)
+                            MPVRenderParam(type: .openGLFBO, data: UnsafeMutableRawPointer(fboPointer)),
+                            MPVRenderParam(type: .flipY, data: UnsafeMutableRawPointer(flipPointer)),
+                            MPVRenderParam(type: .depth, data: UnsafeMutableRawPointer(depthPointer)),
+                            MPVRenderParam(type: .blockForTargetTime, data: UnsafeMutableRawPointer(blockPointer)),
+                            MPVRenderParam(type: .end, data: nil)
                         ]
                         parameters.withUnsafeMutableBufferPointer { buffer in
                             runtime.renderContextRender(renderContext, UnsafeMutableRawPointer(buffer.baseAddress))
@@ -482,6 +422,21 @@ final class MPVPlayback: NSObject {
             throw MPVPlaybackError.initializationFailed("IINA/libmpv could not create a playback engine.")
         }
 
+        do {
+            try initializePlayer(player, using: runtime)
+        } catch {
+            runtime.destroy(player)
+            throw error
+        }
+
+        self.player = player
+        commandQueue = MPVCommandQueue { [weak self] arguments, id in
+            self?.submitCommand(arguments, id: id) ?? -1
+        }
+        runtime.setWakeupCallback(player, mpvWakeupCallback, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    private func initializePlayer(_ player: OpaquePointer, using runtime: MPVRuntime) throws {
         let options = [
             ("config", "no"),
             ("terminal", "no"),
@@ -499,30 +454,30 @@ final class MPVPlayback: NSObject {
                 }
             }
             guard result >= 0 else {
-                runtime.destroy(player)
                 throw MPVPlaybackError.initializationFailed("IINA/libmpv rejected option \(name) (error \(result)).")
             }
         }
 
         let result = runtime.initialize(player)
         guard result >= 0 else {
-            runtime.destroy(player)
             throw MPVPlaybackError.initializationFailed("IINA/libmpv could not initialize (error \(result)).")
         }
 
-        let properties: [(String, Int32)] = [("time-pos", 5), ("duration", 5), ("pause", 3), ("volume", 5), ("mute", 3)]
+        let properties: [(name: String, format: Int32)] = [
+            ("time-pos", MPVPropertyFormat.double),
+            ("duration", MPVPropertyFormat.double),
+            ("pause", MPVPropertyFormat.flag),
+            ("volume", MPVPropertyFormat.double),
+            ("mute", MPVPropertyFormat.flag)
+        ]
         for (index, property) in properties.enumerated() {
-            let result = property.0.withCString { runtime.observeProperty(player, UInt64(index + 1), $0, property.1) }
+            let result = property.name.withCString {
+                runtime.observeProperty(player, UInt64(index + 1), $0, property.format)
+            }
             guard result >= 0 else {
-                runtime.destroy(player)
-                throw MPVPlaybackError.initializationFailed("IINA/libmpv could not observe \(property.0) (error \(result)).")
+                throw MPVPlaybackError.initializationFailed("IINA/libmpv could not observe \(property.name) (error \(result)).")
             }
         }
-        self.player = player
-        commandQueue = MPVCommandQueue { [weak self] arguments, id in
-            self?.submitCommand(arguments, id: id) ?? -1
-        }
-        runtime.setWakeupCallback(player, mpvWakeupCallback, Unmanaged.passUnretained(self).toOpaque())
     }
 
     private func sendCommand(_ arguments: [String], completion: @escaping (Int32) -> Void = { _ in }) {
@@ -584,19 +539,20 @@ final class MPVPlayback: NSObject {
     }
 
     private func handleProperty(_ property: MPVPropertyEvent) {
-        guard let name = property.name else { return }
-        switch String(cString: name) {
+        guard let rawName = property.name else { return }
+        let name = String(cString: rawName)
+        switch name {
         case "time-pos", "duration":
             guard hasLoadedMedia, activeLoad?.generation == requestedLoad?.generation else { return }
-            let number = property.format == 5 ? property.data?.load(as: Double.self) : nil
+            let number = property.format == MPVPropertyFormat.double ? property.data?.load(as: Double.self) : nil
             let value = number.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 0
-            let isTime = String(cString: name) == "time-pos"
+            let isTime = name == "time-pos"
             let changed = value != (isTime ? cachedTime : cachedDuration)
             if isTime { cachedTime = value } else { cachedDuration = value }
             // Paused seeks still update the timeline without a polling timer.
             if changed, !isPlaying { onProgressUpdated?() }
         case "pause":
-            guard property.format == 3, let data = property.data else { return }
+            guard property.format == MPVPropertyFormat.flag, let data = property.data else { return }
             let paused = data.load(as: Int32.self) != 0
             let changed = cachedPaused != paused
             cachedPaused = paused
@@ -606,7 +562,7 @@ final class MPVPlayback: NSObject {
                 onStateChanged?()
             }
         case "volume":
-            guard property.format == 5, let data = property.data else { return }
+            guard property.format == MPVPropertyFormat.double, let data = property.data else { return }
             let value = data.load(as: Double.self)
             guard value.isFinite else { return }
             let volume = min(max(value / 100, 0), 1)
@@ -614,7 +570,7 @@ final class MPVPlayback: NSObject {
             desiredVolume = volume
             onStateChanged?()
         case "mute":
-            guard property.format == 3, let data = property.data else { return }
+            guard property.format == MPVPropertyFormat.flag, let data = property.data else { return }
             let muted = data.load(as: Int32.self) != 0
             guard desiredMuted != muted else { return }
             desiredMuted = muted
@@ -684,54 +640,63 @@ final class MPVPlayback: NSObject {
         guard let runtime, let player else { return }
 
         while let rawEvent = runtime.waitEvent(player, 0) {
-            let event = rawEvent.assumingMemoryBound(to: MPVEvent.self)
-            guard event.pointee.eventID != 0 else { break }
+            let event = rawEvent.assumingMemoryBound(to: MPVEvent.self).pointee
+            guard event.eventID != MPVEventID.none else { break }
 
-            switch event.pointee.eventID {
-            case 5: // MPV_EVENT_COMMAND_REPLY
-                commandQueue?.receiveReply(id: event.pointee.replyUserdata, error: event.pointee.error)
-            case 6:
-                guard let startFile = event.pointee.data?
-                    .assumingMemoryBound(to: MPVStartFileEvent.self).pointee,
-                      let pendingLoad else { continue }
-                if requestedLoad?.generation == pendingLoad.generation {
-                    activeLoad = MPVLoadIdentity(
-                        generation: pendingLoad.generation,
-                        playlistEntryID: startFile.playlistEntryID,
-                        url: pendingLoad.url
-                    )
+            switch event.eventID {
+            case MPVEventID.commandReply:
+                commandQueue?.receiveReply(id: event.replyUserdata, error: event.error)
+            case MPVEventID.startFile:
+                if let startFile = event.data?.assumingMemoryBound(to: MPVStartFileEvent.self).pointee {
+                    handleStartFile(startFile)
                 }
-                self.pendingLoad = nil
-                if requestedLoad == nil {
-                    sendCommand(["stop"])
-                } else {
-                    scheduleRequestedLoad()
+            case MPVEventID.endFile:
+                if let endFile = event.data?.assumingMemoryBound(to: MPVEndFileEvent.self).pointee {
+                    handleEndFile(endFile)
                 }
-            case 7:
-                guard let endFile = event.pointee.data?
-                    .assumingMemoryBound(to: MPVEndFileEvent.self).pointee,
-                      let activeLoad,
-                      Self.shouldHandle(endFile: endFile, for: activeLoad, isStopping: !hasLoadedMedia)
-                else { continue }
-                if endFile.reason == 0, !endWasReported {
-                    endWasReported = true
-                    clearLoadedMedia()
-                    onStateChanged?()
-                    onEnded?()
-                } else if endFile.reason == 4 {
-                    clearLoadedMedia()
-                    onStateChanged?()
-                    onFailed?(activeLoad.url, MPVPlaybackError.initializationFailed(
-                        "IINA/libmpv could not decode this video (error \(endFile.error))."
-                    ))
-                }
-            case 22: // MPV_EVENT_PROPERTY_CHANGE
-                if let property = event.pointee.data?.assumingMemoryBound(to: MPVPropertyEvent.self).pointee {
+            case MPVEventID.propertyChange:
+                if let property = event.data?.assumingMemoryBound(to: MPVPropertyEvent.self).pointee {
                     handleProperty(property)
                 }
             default:
                 continue
             }
+        }
+    }
+
+    private func handleStartFile(_ event: MPVStartFileEvent) {
+        guard let pendingLoad else { return }
+        if requestedLoad?.generation == pendingLoad.generation {
+            activeLoad = MPVLoadIdentity(
+                generation: pendingLoad.generation,
+                playlistEntryID: event.playlistEntryID,
+                url: pendingLoad.url
+            )
+        }
+        self.pendingLoad = nil
+        if requestedLoad == nil {
+            sendCommand(["stop"])
+        } else {
+            scheduleRequestedLoad()
+        }
+    }
+
+    private func handleEndFile(_ event: MPVEndFileEvent) {
+        guard let activeLoad,
+              Self.shouldHandle(endFile: event, for: activeLoad, isStopping: !hasLoadedMedia)
+        else { return }
+
+        if event.reason == MPVEndFileReason.endOfFile, !endWasReported {
+            endWasReported = true
+            clearLoadedMedia()
+            onStateChanged?()
+            onEnded?()
+        } else if event.reason == MPVEndFileReason.error {
+            clearLoadedMedia()
+            onStateChanged?()
+            onFailed?(activeLoad.url, MPVPlaybackError.initializationFailed(
+                "IINA/libmpv could not decode this video (error \(event.error))."
+            ))
         }
     }
 
