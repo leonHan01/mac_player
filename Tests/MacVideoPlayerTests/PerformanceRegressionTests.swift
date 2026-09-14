@@ -4,7 +4,7 @@ import XCTest
 
 final class PerformanceRegressionTests: XCTestCase {
     func testFrameRequestsCoalesceUntilTheQueuedRequestIsProcessed() {
-        let coordinator = MPVFrameRequestCoordinator()
+        let coordinator = MPVCallbackCoordinator()
 
         XCTAssertTrue(coordinator.beginRequest())
         XCTAssertFalse(coordinator.beginRequest())

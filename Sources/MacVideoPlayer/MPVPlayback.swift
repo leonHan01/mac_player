@@ -111,15 +111,22 @@ private struct PendingMPVLoad {
     let url: URL
 }
 
+private struct PendingMPVSeek {
+    let id = UUID()
+    let target: Double
+    var accepted = false
+    var receivedPosition = false
+}
+
 private typealias MPVGetOpenGLProcAddress = @convention(c) (
     UnsafeMutableRawPointer?,
     UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer?
 
-/// libmpv may issue more than one render update before AppKit has processed
-/// the first display request. Keep at most one request queued on the main
-/// thread so decoding cannot build up an unbounded backlog of no-op redraws.
-final class MPVFrameRequestCoordinator: @unchecked Sendable {
+/// libmpv can issue many callbacks before the main thread processes the first.
+/// Each consumer keeps at most one request queued, avoiding a backlog of empty
+/// event drains or redundant display requests.
+final class MPVCallbackCoordinator: @unchecked Sendable {
     private let lock = NSLock()
     private var hasPendingRequest = false
 
@@ -139,7 +146,7 @@ final class MPVFrameRequestCoordinator: @unchecked Sendable {
     }
 }
 
-private let mpvFrameRequestCoordinator = MPVFrameRequestCoordinator()
+private let mpvFrameRequestCoordinator = MPVCallbackCoordinator()
 
 @MainActor
 final class MPVPlayback: NSObject {
@@ -151,7 +158,10 @@ final class MPVPlayback: NSObject {
     private let libraryURL: URL?
     private let screenshotDirectory: URL?
     private var commandQueue: MPVCommandQueue?
+    nonisolated private let eventRequestCoordinator = MPVCallbackCoordinator()
     private var requestedLoad: PendingMPVLoad?
+    private var pendingSeek: PendingMPVSeek?
+    private var seekRecoveryTimer: Timer?
     private var cachedTime = 0.0
     private var cachedDuration = 0.0
     private var cachedPaused = true
@@ -177,7 +187,7 @@ final class MPVPlayback: NSObject {
 
     var isActive: Bool { hasLoadedMedia }
     var isPlaying: Bool { hasLoadedMedia && !cachedPaused }
-    var currentTime: Double { cachedTime }
+    var currentTime: Double { pendingSeek?.target ?? cachedTime }
     var duration: Double { cachedDuration }
     var volume: Double { desiredVolume }
     var isMuted: Bool { desiredMuted }
@@ -204,6 +214,7 @@ final class MPVPlayback: NSObject {
     /// sequences to be checked without creating a window or decoding a video.
     func loadMedia(url: URL) throws {
         try ensurePlayer()
+        clearPendingSeek()
         nextLoadGeneration &+= 1
         requestedLoad = PendingMPVLoad(generation: nextLoadGeneration, url: url)
         activeLoad = nil
@@ -257,8 +268,49 @@ final class MPVPlayback: NSObject {
     }
 
     func seek(to seconds: Double) {
-        guard seconds.isFinite else { return }
-        sendCommand(["seek", String(max(0, seconds)), "absolute+exact"])
+        guard hasLoadedMedia, seconds.isFinite else { return }
+        clearPendingSeek()
+        let seek = PendingMPVSeek(target: max(0, seconds))
+        pendingSeek = seek
+        // The slider refreshes synchronously, while mpv replies later. Keep
+        // the user's target separate from the last observed engine position.
+        sendCommand(["seek", String(seek.target), "absolute+exact"]) { [weak self] result in
+            guard let self, self.pendingSeek?.id == seek.id else { return }
+            if result < 0 {
+                self.clearPendingSeek()
+                self.onProgressUpdated?()
+                return
+            }
+            let previousTime = self.currentTime
+            self.pendingSeek?.accepted = true
+            self.finishSeekIfReached()
+            if self.currentTime != previousTime { self.onProgressUpdated?() }
+            guard self.pendingSeek?.id == seek.id else { return }
+            // A non-seekable file or discontinuous timestamps may never
+            // report the requested position. Do not leave its timeline frozen.
+            let timer = Timer(timeInterval: 5, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.pendingSeek?.id == seek.id else { return }
+                    self.clearPendingSeek()
+                    self.onProgressUpdated?()
+                }
+            }
+            self.seekRecoveryTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+        onProgressUpdated?()
+    }
+
+    private func finishSeekIfReached() {
+        guard let pendingSeek, pendingSeek.accepted, pendingSeek.receivedPosition,
+              abs(cachedTime - pendingSeek.target) <= 1 else { return }
+        clearPendingSeek()
+    }
+
+    private func clearPendingSeek() {
+        pendingSeek = nil
+        seekRecoveryTimer?.invalidate()
+        seekRecoveryTimer = nil
     }
 
     func setVolume(_ volume: Double) {
@@ -349,6 +401,7 @@ final class MPVPlayback: NSObject {
     }
 
     func shutdown() {
+        clearPendingSeek()
         progressTimer?.invalidate()
         progressTimer = nil
         requestedLoad = nil
@@ -545,10 +598,20 @@ final class MPVPlayback: NSObject {
         case "time-pos", "duration":
             guard hasLoadedMedia, activeLoad?.generation == requestedLoad?.generation else { return }
             let number = property.format == MPVPropertyFormat.double ? property.data?.load(as: Double.self) : nil
-            let value = number.flatMap { $0.isFinite ? max(0, $0) : nil } ?? 0
+            // During a seek mpv can temporarily make time-pos unavailable.
+            // That is not a report that playback moved back to zero.
+            guard let number, number.isFinite else { return }
+            let value = max(0, number)
             let isTime = name == "time-pos"
-            let changed = value != (isTime ? cachedTime : cachedDuration)
-            if isTime { cachedTime = value } else { cachedDuration = value }
+            let previousValue = isTime ? currentTime : cachedDuration
+            if isTime {
+                cachedTime = value
+                pendingSeek?.receivedPosition = true
+                finishSeekIfReached()
+            } else {
+                cachedDuration = value
+            }
+            let changed = previousValue != (isTime ? currentTime : cachedDuration)
             // Paused seeks still update the timeline without a polling timer.
             if changed, !isPlaying { onProgressUpdated?() }
         case "pause":
@@ -603,6 +666,7 @@ final class MPVPlayback: NSObject {
     }
 
     private func clearLoadedMedia() {
+        clearPendingSeek()
         requestedLoad = nil
         activeLoad = nil
         hasLoadedMedia = false
@@ -631,7 +695,12 @@ final class MPVPlayback: NSObject {
     }
 
     nonisolated fileprivate func drainEventsFromMPV() {
+        let coordinator = eventRequestCoordinator
+        guard coordinator.beginRequest() else { return }
         Task { @MainActor [weak self] in
+            // Clear before polling: a wakeup during the drain must be able to
+            // schedule another pass, including one arriving just after NONE.
+            coordinator.finishRequest()
             self?.drainEvents()
         }
     }
@@ -639,9 +708,11 @@ final class MPVPlayback: NSObject {
     private func drainEvents() {
         guard let runtime, let player else { return }
 
-        while let rawEvent = runtime.waitEvent(player, 0) {
+        // Yield between batches so a busy producer cannot monopolize the UI.
+        for _ in 0..<64 {
+            guard self.player == player, let rawEvent = runtime.waitEvent(player, 0) else { return }
             let event = rawEvent.assumingMemoryBound(to: MPVEvent.self).pointee
-            guard event.eventID != MPVEventID.none else { break }
+            guard event.eventID != MPVEventID.none else { return }
 
             switch event.eventID {
             case MPVEventID.commandReply:
@@ -662,6 +733,7 @@ final class MPVPlayback: NSObject {
                 continue
             }
         }
+        drainEventsFromMPV()
     }
 
     private func handleStartFile(_ event: MPVStartFileEvent) {

@@ -88,8 +88,12 @@ final class TagStore {
     }
 
     func allTags(for urls: [URL]? = nil) -> [String] {
+        guard !tagsByPath.isEmpty else { return [] }
         // A folder query should scale with the folder, not the entire tag database.
-        normalize(urls.map { $0.flatMap { tags(for: $0) } } ?? tagsByPath.values.flatMap { $0 })
+        if let urls {
+            return normalize(urls.lazy.flatMap { self.tags(for: $0) })
+        }
+        return normalize(tagsByPath.values.lazy.flatMap { $0 })
     }
 
     private func load() throws {
@@ -194,21 +198,19 @@ final class TagStore {
         }
     }
 
-    private func normalize(_ tags: [String]) -> [String] {
+    private func normalize<T: Sequence>(_ tags: T) -> [String] where T.Element == String {
+        // Repeated tags across a library need trimming/case conversion only
+        // once. Consume lazily so intermediate arrays don't scale with every
+        // occurrence of every tag in the folder.
+        var seenRaw = Set<String>()
         var seen = Set<String>()
-        return tags
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .filter { tag in
-                let key = tag.lowercased()
-                if seen.contains(key) {
-                    return false
-                }
-
-                seen.insert(key)
-                return true
-            }
-            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        var result: [String] = []
+        for tag in tags where seenRaw.insert(tag).inserted {
+            let normalized = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty, seen.insert(normalized.lowercased()).inserted else { continue }
+            result.append(normalized)
+        }
+        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     private func recordKeys(for url: URL) -> Set<String> {

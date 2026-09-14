@@ -18,6 +18,7 @@ func settle() async {
 private final class FakeMPV {
     let handle: UnsafeMutableRawPointer
     let count: @convention(c) () -> Int32
+    let waitCount: @convention(c) () -> Int32
     let pending: @convention(c) () -> Int32
     let argument: @convention(c) (Int32) -> UnsafePointer<CChar>
     let reply: @convention(c) (Int32) -> Void
@@ -30,6 +31,7 @@ private final class FakeMPV {
         handle = libraryHandle
         func symbol<T>(_ name: String) -> T { unsafeBitCast(dlsym(libraryHandle, name)!, to: T.self) }
         count = symbol("fake_command_count")
+        waitCount = symbol("fake_wait_count")
         pending = symbol("fake_awaiting_reply")
         argument = symbol("fake_argument")
         reply = symbol("fake_reply")
@@ -54,6 +56,7 @@ struct RegressionChecks {
         let libraryURL = URL(fileURLWithPath: CommandLine.arguments[1])
         let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try await checkSeekProgress(libraryURL, root)
         checkLanguageSettings(root)
         checkPlaybackRefreshRouting()
         try await checkTagRecovery(root)
@@ -64,7 +67,9 @@ struct RegressionChecks {
         try checkPlaylistStateDeletion(root)
         try await checkLibraryActions(root)
         try await checkTagWritePerformance(root)
+        try await checkTagCollection(root)
         try await checkScanCancellation(root)
+        try checkScanSortEquivalence(root)
         try await checkDeletionDuringLoading(root)
         try await checkSelectionDuringDeletion(root)
         try await checkTagInput(root)
@@ -72,6 +77,101 @@ struct RegressionChecks {
         checkCommandQueue()
         try await checkPlaybackEvents(libraryURL, root)
         print("PASS: tag protection, tag filtering, sort races, command ordering, EOF/replay, late events, screenshots")
+    }
+
+    static func checkSeekProgress(_ libraryURL: URL, _ root: URL) async throws {
+        let fake = FakeMPV(url: libraryURL)
+        let engine = MPVPlayback(libraryURL: libraryURL)
+        defer { engine.shutdown() }
+        try engine.loadMedia(url: root.appendingPathComponent("seek.mp4"))
+        fake.start(1)
+        await fake.finishCommands()
+        fake.property("duration", 300, 5)
+        fake.property("time-pos", 12, 5)
+        await settle()
+        expect(engine.currentTime == 12, "The timeline must start at the reported playback position")
+
+        // progressSliderChanged refreshes from currentTime immediately after seek.
+        // No mpv reply or new position is available during that same UI action.
+        engine.seek(to: 120)
+        expect(engine.currentTime == 120,
+               "The first slider seek must not jump back to the old position before mpv responds")
+        fake.property("time-pos", 12.25, 5)
+        await settle()
+        expect(engine.currentTime == 120, "A queued old progress event must not undo a slider seek")
+        fake.reply(0)
+        await settle()
+        fake.property("time-pos", 12.5, 5)
+        fake.property("time-pos", 0, 0)
+        await settle()
+        expect(engine.currentTime == 120,
+               "Command acceptance and unavailable positions must not end seek protection")
+        fake.property("time-pos", 120.04, 5)
+        await settle()
+        expect(engine.currentTime == 120.04, "The timeline must resume from the confirmed target frame")
+        fake.property("time-pos", 121.25, 5)
+        await settle()
+        expect(engine.currentTime == 121.25, "Normal playback progress must resume after seeking")
+
+        engine.seek(to: 180)
+        engine.seek(to: 200)
+        engine.seek(to: 30)
+        expect(engine.currentTime == 30, "Coalescing an older drag must preserve the latest target")
+        fake.property("time-pos", 180, 5)
+        fake.reply(0)
+        await settle()
+        expect(engine.currentTime == 30, "An earlier seek completion must not replace the latest drag")
+        expect(String(cString: fake.argument(1)) == "30.0", "Only the latest queued target must be sent")
+        fake.property("time-pos", 30.04, 5)
+        await settle()
+        expect(engine.currentTime == 30, "A position arriving before command acceptance must retain the target")
+        fake.reply(0)
+        await settle()
+        expect(engine.currentTime == 30.04, "Position-before-reply ordering must also finish the latest seek")
+
+        engine.pause()
+        await fake.finishCommands()
+        var displayedTimes: [Double] = []
+        engine.onProgressUpdated = { displayedTimes.append(engine.currentTime) }
+        engine.seek(to: 60)
+        expect(displayedTimes == [60], "A paused seek must immediately refresh its displayed target")
+        fake.property("time-pos", 31, 5)
+        fake.reply(0)
+        await settle()
+        expect(engine.currentTime == 60, "Paused progress callbacks must not undo a seek")
+        fake.property("time-pos", 60.04, 5)
+        await settle()
+        expect(displayedTimes.last == 60.04 && !engine.schedulesProgressUpdates,
+               "A confirmed paused seek must update without starting a polling timer")
+
+        engine.seek(to: 90)
+        fake.reply(-5)
+        await settle()
+        expect(engine.currentTime == 60.04 && displayedTimes.last == 60.04,
+               "A rejected seek must restore the last engine position and refresh paused UI")
+
+        engine.seek(to: 45)
+        fake.property("time-pos", 45.04, 5)
+        await settle()
+        fake.reply(0)
+        await settle()
+        expect(displayedTimes.last == 45.04,
+               "A paused position-before-reply seek must refresh when the reply confirms it")
+
+        engine.seek(to: 90)
+        try engine.loadMedia(url: root.appendingPathComponent("next.mp4"))
+        expect(engine.currentTime == 0, "Opening another video must clear the old seek target")
+        fake.reply(-5)
+        await fake.finishCommands()
+        fake.start(2)
+        await settle()
+        fake.property("time-pos", 4, 5)
+        await settle()
+        expect(engine.currentTime == 4, "A late old seek reply must not affect the new video")
+        engine.seek(to: 40)
+        engine.stop()
+        expect(engine.currentTime == 0, "Stopping must clear pending seek display state")
+        print("PASS: first slider seek, stale progress, rapid drags, paused seeks, failures, and load changes")
     }
 
     static func checkPlaybackRefreshRouting() {
@@ -345,6 +445,22 @@ struct RegressionChecks {
         await settle()
         expect(engine.currentTime == 22 && pausedProgressUpdates == 1,
                "A paused seek must update progress through its property event")
+        let waitsBeforeBurst = fake.waitCount()
+        for second in 1...100 { fake.property("time-pos", Double(second), 5) }
+        await settle()
+        let burstWaits = fake.waitCount() - waitsBeforeBurst
+        print("MEASURE: 100 queued playback events required \(burstWaits) event polls")
+        expect(engine.currentTime == 100, "Coalesced wakeups must still deliver the latest playback position")
+        expect(burstWaits <= 102,
+               "100 queued events required \(burstWaits) polls; wakeups must coalesce instead of queuing empty drains")
+        // A wakeup raised while delivering a property must not be lost.
+        engine.onProgressUpdated = {
+            if engine.currentTime == 101 { fake.property("time-pos", 102, 5) }
+        }
+        fake.property("time-pos", 101, 5)
+        await settle()
+        expect(engine.currentTime == 102, "Events arriving during a drain must be processed")
+        engine.onProgressUpdated = nil
         fake.property("pause", 0, 3)
         await settle()
         expect(engine.schedulesProgressUpdates, "An external unpause must restart the timer")

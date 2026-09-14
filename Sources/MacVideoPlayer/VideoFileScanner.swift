@@ -48,13 +48,20 @@ enum VideoFileScanner {
 
         // There are only two orders. Prepare both on the scan worker so a
         // sort change (including one during loading) never sorts on the UI thread.
-        var playlistsBySortMode: [SortMode: [URL]] = [:]
-        for mode in SortMode.allCases {
-            playlistsBySortMode[mode] = try sorted(
-                videoURLs, sortMode: mode, fileSizes: fileSizes,
-                checkCancellation: checkCancellation
-            )
+        let nameOrder = try sorted(videoURLs, sortMode: .nameAscending, checkCancellation: checkCancellation)
+        // Reuse the natural-name rank to break size ties. Localized string
+        // comparisons and URL name extraction only run for the first order.
+        let sizeEntries = try nameOrder.enumerated().map { index, url in
+            try checkCancellation()
+            return (url: url, rank: index, size: fileSizes[url] ?? 0)
         }
+        let sizeOrder = try sizeEntries.sorted { first, second in
+            try checkCancellation()
+            return first.size == second.size ? first.rank < second.rank : first.size > second.size
+        }.map(\.url)
+        let playlistsBySortMode: [SortMode: [URL]] = [
+            .nameAscending: nameOrder, .sizeDescending: sizeOrder
+        ]
         try checkCancellation()
         guard let first = playlistsBySortMode[sortMode]?.first else {
             throw OpenVideoError.noPlayableFiles(directoryURL.lastPathComponent)

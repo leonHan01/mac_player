@@ -18,6 +18,7 @@ typedef struct {
 
 static Slot events[1024];
 static int read_index, write_index, command_count, awaiting_reply;
+static int wait_count;
 static uint64_t command_id;
 static char last_command[4][4096];
 static void (*wakeup)(void *);
@@ -33,6 +34,7 @@ static Slot *push(int id) {
 static void notify(void) { if (wakeup) wakeup(wakeup_context); }
 void *mpv_create(void) {
     read_index = write_index = command_count = awaiting_reply = 0;
+    wait_count = 0;
     wakeup = NULL;
     return (void *)1;
 }
@@ -46,6 +48,7 @@ void mpv_set_wakeup_callback(void *p, void (*callback)(void *), void *context) {
 }
 void *mpv_wait_event(void *p, double timeout) {
     static Event none;
+    wait_count++;
     return read_index < write_index ? &events[read_index++].event : &none;
 }
 int mpv_command_async(void *p, uint64_t id, const char **args) {
@@ -65,6 +68,7 @@ void mpv_render_context_set_update_callback(void *p, void *cb, void *context) { 
 int mpv_render_context_render(void *p, void *params) { abort(); }
 
 int fake_command_count(void) { return command_count; }
+int fake_wait_count(void) { return wait_count; }
 int fake_awaiting_reply(void) { return awaiting_reply; }
 const char *fake_argument(int i) { return last_command[i]; }
 void fake_reply(int error) {

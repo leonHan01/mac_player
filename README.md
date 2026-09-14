@@ -101,6 +101,14 @@ They cover language persistence, tag entry and input-method behavior, playlist f
 
 Performance regressions also cover background tag writes, concurrent edits and failure recovery, skipped unchanged saves, cached sort orders, scan cancellation, deletion during scanning, and paused progress updates. If an OpenGL pixel format is unavailable, the script reports the hidden-window input checks as skipped and continues with the core checks.
 
+Checks also cover coalesced playback-event bursts, natural sort equivalence, and tag collection deduplication. Run the scanning and tag benchmarks without launching the player:
+
+```sh
+python3 scripts/benchmark-performance.py
+```
+
+The benchmark uses temporary files and synthetic tags, reports the median of five measurements, and never decodes media. See the [performance notes](docs/performance.md) for before/after results and measurement scope.
+
 ## Runtime and license
 
 The packaged application includes IINA/libmpv and related media dependencies. It decodes the original file directly, supports hardware decoding where available, and does not remux or transcode media.

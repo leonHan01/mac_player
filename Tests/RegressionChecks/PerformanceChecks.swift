@@ -55,6 +55,52 @@ private final class TagWriterProbe: @unchecked Sendable {
 }
 
 extension RegressionChecks {
+    static func checkTagCollection(_ root: URL) async throws {
+        let first = root.appendingPathComponent("tag-collection/one.mp4")
+        let second = root.appendingPathComponent("tag-collection/two.mp4")
+        let outside = root.appendingPathComponent("other-folder/three.mp4")
+        let store = TagStore(storeURL: root.appendingPathComponent("tag-collection.json"))
+        expect(store.allTags(for: [first, second]).isEmpty, "An untagged library must have no suggestions")
+        try await store.setTags([" Review ", "Review", "review", "旅行", "", "  "], for: first)
+        try await store.setTags(["review", "Work", "旅行"], for: second)
+        try await store.setTags(["Outside"], for: outside)
+        let expected = ["Review", "Work", "旅行"].sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+        expect(store.allTags(for: [first, second, first]) == expected,
+               "Scoped tag collection must deduplicate, preserve first spelling, and retain localized order")
+        expect(store.allTags(for: []).isEmpty, "An empty scope must not include global tags")
+        expect(Set(store.allTags().map { $0.lowercased() }) == ["review", "work", "旅行", "outside"],
+               "Global tag collection must include all records and merge case variants")
+        try await store.removeTags(for: first)
+        try await store.setTags(["Updated"], for: second)
+        expect(store.allTags(for: [first, second]) == ["Updated"],
+               "Tag collection must reflect committed removals and replacements")
+        print("PASS: streamed tag collection, scope isolation, normalization, and mutation refresh")
+    }
+
+    static func checkScanSortEquivalence(_ root: URL) throws {
+        let folder = root.appendingPathComponent("sort-equivalence", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for (name, size) in [("Episode 10.mp4", 10), ("Episode 2.mp4", 10),
+                             ("Episode 1.mp4", 20), ("中文 10.mov", 0), ("中文 2.mov", 0)] {
+            try Data(repeating: 0, count: size).write(to: folder.appendingPathComponent(name))
+        }
+        let result = try VideoFileScanner.buildLoadResult(for: folder, sortMode: .nameAscending)
+        for mode in SortMode.allCases {
+            let expected = try VideoFileScanner.sorted(
+                Array(result.urls.reversed()), sortMode: mode, fileSizes: result.fileSizes
+            )
+            expect(result.playlistsBySortMode[mode] == expected,
+                   "Reusing name order must preserve size ordering, numeric names, and localized ties")
+        }
+        let requestedFile = folder.appendingPathComponent("Episode 10.mp4")
+        let explicit = try VideoFileScanner.buildLoadResult(for: requestedFile, sortMode: .sizeDescending)
+        expect(explicit.startURL == requestedFile && !explicit.startsAtFirstVideo,
+               "Sharing sort work must preserve an explicitly selected file")
+        print("PASS: shared scan sorting preserves size order, natural-name ties, and explicit selection")
+    }
+
     static func checkDeletionDuringLoading(_ root: URL) async throws {
         let folder = root.appendingPathComponent("deletion-videos", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
