@@ -21,6 +21,7 @@ private final class FakeMPV {
     let waitCount: @convention(c) () -> Int32
     let pending: @convention(c) () -> Int32
     let argument: @convention(c) (Int32) -> UnsafePointer<CChar>
+    let initialOption: @convention(c) (UnsafePointer<CChar>) -> UnsafePointer<CChar>
     let reply: @convention(c) (Int32) -> Void
     let start: @convention(c) (Int64) -> Void
     let end: @convention(c) (Int64, Int32) -> Void
@@ -34,6 +35,7 @@ private final class FakeMPV {
         waitCount = symbol("fake_wait_count")
         pending = symbol("fake_awaiting_reply")
         argument = symbol("fake_argument")
+        initialOption = symbol("fake_initial_option")
         reply = symbol("fake_reply")
         start = symbol("fake_start")
         end = symbol("fake_end")
@@ -56,10 +58,17 @@ struct RegressionChecks {
         let libraryURL = URL(fileURLWithPath: CommandLine.arguments[1])
         let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        checkSeekCommandRate()
         try await checkSeekProgress(libraryURL, root)
+        try await checkInteractiveSeeks(libraryURL, root)
+        try await checkPlaybackNotificationBatches(libraryURL, root)
+        try await checkEarlyVideoOpen(root)
+        try await checkEarlyVideoOpenRaces(root)
         checkLanguageSettings(root)
+        try await checkVideoClips(root)
         checkPlaybackRefreshRouting()
         try await checkTagRecovery(root)
+        try await checkTagLoadNormalization(root)
         try await checkPlaylistMutations(root)
         try checkPlaylistStateLoading(root)
         try checkPlaylistStateFiltering(root)
@@ -94,6 +103,7 @@ struct RegressionChecks {
         // progressSliderChanged refreshes from currentTime immediately after seek.
         // No mpv reply or new position is available during that same UI action.
         engine.seek(to: 120)
+        engine.finishSeeking()
         expect(engine.currentTime == 120,
                "The first slider seek must not jump back to the old position before mpv responds")
         fake.property("time-pos", 12.25, 5)
@@ -116,6 +126,7 @@ struct RegressionChecks {
         engine.seek(to: 180)
         engine.seek(to: 200)
         engine.seek(to: 30)
+        engine.finishSeeking()
         expect(engine.currentTime == 30, "Coalescing an older drag must preserve the latest target")
         fake.property("time-pos", 180, 5)
         fake.reply(0)
@@ -134,6 +145,7 @@ struct RegressionChecks {
         var displayedTimes: [Double] = []
         engine.onProgressUpdated = { displayedTimes.append(engine.currentTime) }
         engine.seek(to: 60)
+        engine.finishSeeking()
         expect(displayedTimes == [60], "A paused seek must immediately refresh its displayed target")
         fake.property("time-pos", 31, 5)
         fake.reply(0)
@@ -145,12 +157,14 @@ struct RegressionChecks {
                "A confirmed paused seek must update without starting a polling timer")
 
         engine.seek(to: 90)
+        engine.finishSeeking()
         fake.reply(-5)
         await settle()
         expect(engine.currentTime == 60.04 && displayedTimes.last == 60.04,
                "A rejected seek must restore the last engine position and refresh paused UI")
 
         engine.seek(to: 45)
+        engine.finishSeeking()
         fake.property("time-pos", 45.04, 5)
         await settle()
         fake.reply(0)
@@ -159,9 +173,14 @@ struct RegressionChecks {
                "A paused position-before-reply seek must refresh when the reply confirms it")
 
         engine.seek(to: 90)
+        engine.finishSeeking()
+        engine.seek(to: 100)
         try engine.loadMedia(url: root.appendingPathComponent("next.mp4"))
         expect(engine.currentTime == 0, "Opening another video must clear the old seek target")
         fake.reply(-5)
+        await settle()
+        expect(String(cString: fake.argument(0)) == "loadfile",
+               "Opening another video must discard the old queued seek before loading")
         await fake.finishCommands()
         fake.start(2)
         await settle()
@@ -169,9 +188,201 @@ struct RegressionChecks {
         await settle()
         expect(engine.currentTime == 4, "A late old seek reply must not affect the new video")
         engine.seek(to: 40)
+        engine.seek(to: 60)
         engine.stop()
         expect(engine.currentTime == 0, "Stopping must clear pending seek display state")
+        fake.reply(0)
+        await settle()
+        expect(String(cString: fake.argument(0)) == "stop",
+               "Stopping must discard the queued seek and send stop after the in-flight command")
         print("PASS: first slider seek, stale progress, rapid drags, paused seeks, failures, and load changes")
+    }
+
+    static func checkInteractiveSeeks(_ libraryURL: URL, _ root: URL) async throws {
+        let fake = FakeMPV(url: libraryURL)
+        let engine = MPVPlayback(libraryURL: libraryURL)
+        defer { engine.shutdown() }
+        engine.setVolume(0.35)
+        engine.setMuted(true)
+        try engine.loadMedia(url: root.appendingPathComponent("interactive-seek.mp4"))
+        fake.start(1)
+        await fake.finishCommands()
+        expect(fake.count() == 2, "Opening a file must only enqueue load and resume, without redundant audio settings")
+        expect(String(cString: fake.initialOption("volume")) == "35.0"
+               && String(cString: fake.initialOption("mute")) == "yes",
+               "Cold startup must initialize the user's saved volume and mute before loading")
+        engine.pause()
+        await fake.finishCommands()
+
+        let beforeDrag = fake.count()
+        engine.beginSeeking()
+        engine.seek(to: 120)
+        expect(String(cString: fake.argument(2)) == "absolute+keyframes",
+               "Dragging must preview keyframes instead of repeatedly decoding to exact targets")
+        fake.reply(0)
+        await settle()
+        fake.property("time-pos", 110, 5)
+        await settle()
+        expect(engine.currentTime == 120, "A nearby preview frame must not overwrite the user's target")
+        engine.seek(to: 180)
+        engine.seek(to: 30)
+        engine.finishSeeking()
+        expect(String(cString: fake.argument(1)) == "30.0"
+               && String(cString: fake.argument(2)) == "absolute+exact",
+               "Release must replace deferred previews with an exact seek to the last target")
+        fake.reply(0)
+        await settle()
+        fake.property("time-pos", 30.04, 5)
+        await settle()
+        expect(engine.currentTime == 30.04 && !engine.isPlaying && fake.count() == beforeDrag + 2,
+               "The final frame must remain precise, paused, and free of intermediate exact seeks")
+        engine.finishSeeking()
+        expect(fake.count() == beforeDrag + 2, "Repeated release/focus-loss events must not duplicate the final seek")
+
+        engine.seek(to: 60)
+        expect(String(cString: fake.argument(2)) == "absolute+exact", "A discrete seek must retain exact positioning")
+        await fake.finishCommands()
+        engine.finishSeeking()
+        engine.beginSeeking()
+        engine.seek(to: 10)
+        fake.reply(-5)
+        await settle()
+        engine.finishSeeking()
+        expect(String(cString: fake.argument(1)) == "10.0"
+               && String(cString: fake.argument(2)) == "absolute+exact",
+               "A failed keyframe preview must still allow the final exact seek")
+        await fake.finishCommands()
+        engine.finishSeeking()
+
+        engine.beginSeeking()
+        engine.seek(to: 100)
+        engine.seek(to: 200)
+        let beforeSwitch = fake.count()
+        try engine.loadMedia(url: root.appendingPathComponent("interactive-next.mp4"))
+        engine.finishSeeking()
+        fake.reply(0)
+        await settle()
+        expect(String(cString: fake.argument(0)) == "loadfile", "Switching files must discard both the preview and final drag target")
+        fake.start(2)
+        await fake.finishCommands()
+        expect(fake.count() == beforeSwitch + 2 && engine.volume == 0.35 && engine.isMuted,
+               "Switching must preserve audio state with only load and resume commands")
+        print("PASS: keyframe previews, exact release, paused/discrete seeks, failed preview recovery, and two-command switching")
+    }
+
+    static func checkPlaybackNotificationBatches(_ libraryURL: URL, _ root: URL) async throws {
+        let fake = FakeMPV(url: libraryURL)
+        let engine = MPVPlayback(libraryURL: libraryURL)
+        defer { engine.shutdown() }
+        try engine.loadMedia(url: root.appendingPathComponent("notification-batches.mp4"))
+        fake.start(1)
+        await fake.finishCommands()
+        engine.pause()
+        await fake.finishCommands()
+
+        var positions: [Double] = []
+        var volumes: [Double] = []
+        engine.onProgressUpdated = { positions.append(engine.currentTime) }
+        engine.onStateChanged = { volumes.append(engine.volume) }
+        for position in 1...100 { fake.property("time-pos", Double(position), 5) }
+        await settle()
+        expect(positions.last == 100, "Batched progress must display the latest position")
+        expect(positions.count <= 2,
+               "100 paused progress events triggered \(positions.count) UI refreshes; notify once per drain batch")
+        for volume in 1...100 { fake.property("volume", Double(volume), 5) }
+        await settle()
+        expect(volumes.last == 1 && volumes.count <= 2,
+               "100 volume events must publish the final volume with at most two state refreshes")
+        print("MEASURE: 100 progress events -> \(positions.count) UI callbacks; 100 volume events -> \(volumes.count) state callbacks")
+
+        positions.removeAll()
+        volumes.removeAll()
+        for index in 1...100 { fake.property("pause", index % 2 == 0 ? 1 : 0, 3) }
+        await settle()
+        expect(!engine.isPlaying && !engine.schedulesProgressUpdates && volumes.count <= 2 && positions.count <= 2,
+               "Pause bursts must publish their final state without leaving a progress timer running")
+        fake.property("pause", 0, 3)
+        await settle()
+        expect(engine.isPlaying && engine.schedulesProgressUpdates, "A final unpause must restore progress updates")
+
+        positions.removeAll()
+        engine.seek(to: 140)
+        expect(positions == [140], "Direct seek input must still publish its target synchronously")
+        engine.finishSeeking()
+        await fake.finishCommands()
+        engine.pause()
+        await fake.finishCommands()
+        volumes.removeAll()
+        engine.onProgressUpdated = { engine.shutdown() }
+        fake.property("time-pos", 140.04, 5)
+        fake.property("volume", 20, 5)
+        await settle()
+        expect(!engine.isActive && volumes.isEmpty,
+               "Shutdown from a progress callback must prevent further callbacks from the old batch")
+        print("PASS: bounded playback UI notifications, final values, timer state, immediate input, and shutdown")
+    }
+
+    static func checkSeekCommandRate() {
+        var submitted: [(target: String, id: UInt64)] = []
+        var resume: (@MainActor () -> Void)?
+        var completions: [Int32] = []
+        let queue = MPVCommandQueue(scheduleSeekResume: { action in
+            resume = action
+            return { resume = nil }
+        }) { arguments, id in
+            submitted.append((arguments[0] == "seek" ? arguments[1] : arguments[0], id))
+            return 0
+        }
+        defer { queue.cancelAll() }
+        // Command acceptance can be immediate even while the decoder is still
+        // locating the frame. Exercise separate replies between input updates.
+        for target in 0..<100 {
+            queue.enqueue(["seek", String(target), "absolute+exact"], coalescingKey: "seek") {
+                completions.append($0)
+            }
+            queue.receiveReply(id: submitted.last!.id, error: 0)
+        }
+        expect(submitted.count == 1,
+               "Fast command replies must not turn every drag/repeat event into another decoder seek")
+        expect(resume != nil, "A trailing seek must be scheduled without requiring another input event")
+        resume?()
+        expect(submitted.map(\.target) == ["0", "99"],
+               "The cooldown must send only the final target from the input burst")
+        print("MEASURE: 100 seek inputs in one cooldown window submitted \(submitted.count) commands including the trailing target")
+        queue.receiveReply(id: submitted.last!.id, error: 0)
+        expect(completions.count == 100 && completions.filter { $0 == 0 }.count == 2,
+               "Every coalesced request must finish exactly once")
+
+        queue.enqueue(["seek", "100", "absolute+exact"], coalescingKey: "seek")
+        expect(submitted.count == 2, "The next input inside the cooldown must wait")
+        queue.finishSeeking()
+        expect(submitted.last?.target == "100", "Mouse/key release must submit the final target immediately")
+        queue.receiveReply(id: submitted.last!.id, error: 0)
+        queue.enqueue(["pause"])
+        expect(submitted.last?.target == "pause", "A cooldown alone must not delay playback controls")
+        queue.receiveReply(id: submitted.last!.id, error: 0)
+
+        var cancelledTarget = false
+        queue.enqueue(["seek", "101", "absolute+exact"], coalescingKey: "seek") {
+            cancelledTarget = $0 < 0
+        }
+        queue.enqueue(["stop"])
+        queue.discardPendingSeeks()
+        expect(cancelledTarget && submitted.last?.target == "stop" && resume == nil,
+               "A file change or stop must drop stale seek targets and clear the cooldown")
+        queue.receiveReply(id: submitted.last!.id, error: 0)
+        queue.enqueue(["seek", "102", "absolute+exact"], coalescingKey: "seek")
+        queue.enqueue(["seek", "103", "absolute+exact"], coalescingKey: "seek")
+        resume?()
+        queue.finishSeeking()
+        expect(submitted.last?.target == "102",
+               "Timer expiry and release must still wait for the in-flight command reply")
+        queue.receiveReply(id: submitted.last!.id, error: 0)
+        expect(submitted.suffix(2).map(\.target) == ["102", "103"],
+               "A delayed reply must submit the final target exactly once after release")
+        queue.cancelAll()
+        expect(resume == nil, "Shutdown must cancel scheduled seek work")
+        print("PASS: paced seeks with fast replies, trailing target, release flush, controls, and cancellation")
     }
 
     static func checkPlaybackRefreshRouting() {
@@ -317,7 +528,7 @@ struct RegressionChecks {
             libraryActions: actions,
             openFileAction: {}, openFolderAction: {}, previousAction: {}, nextAction: {},
             playPauseAction: {}, sortAction: {}, seekForwardAction: { _ in }, seekBackwardAction: { _ in },
-            deleteAction: {}
+            deleteAction: {}, screenshotAction: {}, trimVideoAction: {}
         )
         // The window is never shown; the empty composition contains no media.
         controller.player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
@@ -435,6 +646,13 @@ struct RegressionChecks {
         let commandsBeforeReads = fake.count()
         expect(engine.currentTime == 12 && engine.duration == 60 && engine.isPlaying, "Playback UI must use observed properties")
         expect(fake.count() == commandsBeforeReads, "Reading UI state must not send work to mpv")
+        engine.setKeepOpen(true)
+        expect(String(cString: fake.argument(1)) == "keep-open" && String(cString: fake.argument(2)) == "always",
+               "Trim mode must retain the final frame instead of advancing the playlist")
+        await fake.finishCommands()
+        engine.setKeepOpen(false)
+        expect(String(cString: fake.argument(2)) == "no", "Exiting trim mode must restore normal end-of-file behavior")
+        await fake.finishCommands()
         expect(engine.schedulesProgressUpdates, "Playing media must schedule progress updates")
         engine.pause()
         expect(!engine.schedulesProgressUpdates, "Pausing must remove the progress timer immediately")
@@ -473,6 +691,7 @@ struct RegressionChecks {
         let commandsBeforeSeeks = fake.count()
 
         for second in 0..<100 { engine.seek(to: Double(second)) }
+        engine.finishSeeking()
         expect(fake.count() == commandsBeforeSeeks + 1, "A slider drag must leave the main actor responsive")
         fake.reply(0)
         await settle()

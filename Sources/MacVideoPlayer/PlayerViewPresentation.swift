@@ -14,6 +14,14 @@ extension PlayerView {
         titleFolderButton.title = AppStrings.folder
         styleTitleButton(titleFolderButton, symbolName: "folder")
         titleFolderButton.toolTip = AppStrings.openFolder
+        screenshotButton.title = AppStrings.screenshot
+        styleTitleButton(screenshotButton, symbolName: "camera")
+        updateScreenshotShortcut(screenshotShortcut)
+        trimVideoButton.title = AppStrings.trimVideo
+        styleTitleButton(trimVideoButton, symbolName: "scissors")
+        trimVideoButton.toolTip = "\(AppStrings.trimVideo) (⇧⌘E)"
+        trimVideoButton.setAccessibilityLabel(AppStrings.trimVideo)
+        applyClipLanguage()
 
         newTagField.placeholderString = AppStrings.addTag
         newTagField.toolTip = AppStrings.tagInputHint
@@ -40,12 +48,19 @@ extension PlayerView {
         volumeSlider.setAccessibilityLabel(AppStrings.volume)
 
         renderedPlaybackState = nil
+        renderedVolumeSymbol = nil
         renderedCurrentTags = nil
         renderedAvailableTags = nil
         updateEmptyState()
         updateTagControls()
         playlistTableView.reloadData()
         updatePlaylist()
+    }
+
+    internal func updateScreenshotShortcut(_ shortcut: ScreenshotShortcut) {
+        screenshotShortcut = shortcut
+        screenshotButton.toolTip = "\(AppStrings.screenshotShortcutTooltip) (\(shortcut.displayString))"
+        screenshotButton.setAccessibilityLabel(AppStrings.screenshotShortcutTooltip)
     }
 
     internal func restorePlaybackShortcutFocus() {
@@ -62,10 +77,23 @@ extension PlayerView {
         window.makeFirstResponder(nil)
     }
 
+    internal func updatePlaybackState() {
+        // Pause, volume, and mute normally change only playback controls. A
+        // transition into/out of active media also changes the canvas/layout.
+        if renderedCanvasHasItem != playerController.hasActivePlayback {
+            updateEmptyState()
+        } else {
+            updatePlayPauseButton()
+            updateVolumeControls()
+        }
+        updateProgress()
+    }
+
     internal func updateEmptyState() {
+        synchronizeClipMode()
         let hasItem = playerController.hasActivePlayback
         let hasPlaylist = playerController.hasPlaylist
-        let isLoading = playerController.isLoading
+        let isLoading = playerController.isLoadingPlayback
         updateWindowTitle()
         updateLibraryLayout(hasPlaylist: hasPlaylist)
         updateCanvasAppearance(hasItem: hasItem)
@@ -93,6 +121,10 @@ extension PlayerView {
         nextButton.isEnabled = hasPlaylist && !isLoading && playerController.hasNext
         playbackModeButton.isEnabled = hasPlaylist && !isLoading
         sortModeButton.isEnabled = hasPlaylist && !isLoading
+        screenshotButton.isEnabled = hasItem && !isLoading
+        trimVideoButton.isEnabled = hasItem && !isLoading
+        // Membership is still being expanded; enable filters on the full list.
+        tagFilterPopup.isEnabled = hasPlaylist && !playerController.isLoading
         progressSlider.isEnabled = hasItem && !isLoading
         volumeButton.isEnabled = hasItem && !isLoading
         volumeSlider.isEnabled = hasItem && !isLoading
@@ -100,6 +132,7 @@ extension PlayerView {
         updatePlaybackModeButton()
         updateSortModeButton()
         updateVolumeControls()
+        refreshClipControls()
     }
 
     private func updateCanvasAppearance(hasItem: Bool) {
@@ -258,30 +291,42 @@ extension PlayerView {
     }
 
     internal func showScreenshotToast(for url: URL) {
-        screenshotToastDismissWorkItem?.cancel()
-        screenshotToastLabel.stringValue = AppStrings.screenshotSaved
-        screenshotToast.toolTip = url.path
-        screenshotToast.isHidden = false
-        screenshotToast.alphaValue = 0
+        showNotification(AppStrings.screenshotSaved, detail: url.path, duration: 2.4)
+    }
+
+    internal func showNotification(_ message: String, detail: String? = nil, duration: TimeInterval = 5) {
+        notificationDismissWorkItem?.cancel()
+        let identifier = UUID()
+        notificationID = identifier
+        notificationToast.layer?.removeAllAnimations()
+        notificationToastLabel.stringValue = message
+        notificationToast.toolTip = detail ?? message
+        notificationToast.setAccessibilityLabel(message)
+        notificationToast.setAccessibilityHelp(detail)
+        notificationToast.isHidden = false
+        notificationToast.alphaValue = 0
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.16
-            screenshotToast.animator().alphaValue = 1
+            notificationToast.animator().alphaValue = 1
         }
 
         let dismissWorkItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.notificationID == identifier else { return }
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.2
-                self.screenshotToast.animator().alphaValue = 0
-            }, completionHandler: {
+                self.notificationToast.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
                 Task { @MainActor [weak self] in
-                    self?.screenshotToast.isHidden = true
+                    guard let self, self.notificationID == identifier else { return }
+                    self.notificationToast.isHidden = true
+                    self.notificationID = nil
+                    self.notificationDismissWorkItem = nil
                 }
             })
         }
-        screenshotToastDismissWorkItem = dismissWorkItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4, execute: dismissWorkItem)
+        notificationDismissWorkItem = dismissWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: dismissWorkItem)
     }
 
     internal func installTimeObserver() {
@@ -303,6 +348,7 @@ extension PlayerView {
             return
         }
 
+        updateClipProgress(playerController.playbackCurrentTime)
         let currentSeconds = playerController.playbackCurrentTime
         let durationSeconds = playerController.playbackDuration
 
@@ -341,7 +387,7 @@ extension PlayerView {
             progressSlider.maxValue = maximum
         }
 
-        if !isSeeking, progressSlider.doubleValue != value {
+        if !isSeeking, !progressSlider.isTrackingSeek, progressSlider.doubleValue != value {
             progressSlider.doubleValue = value
         }
     }
@@ -412,11 +458,16 @@ extension PlayerView {
             symbolName = "speaker.wave.2.fill"
         }
 
-        volumeButton.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: AppStrings.volume
-        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
-        volumeSlider.doubleValue = volume
+        if renderedVolumeSymbol != symbolName {
+            volumeButton.image = NSImage(
+                systemSymbolName: symbolName,
+                accessibilityDescription: AppStrings.volume
+            )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
+            renderedVolumeSymbol = symbolName
+        }
+        if volumeSlider.doubleValue != volume {
+            volumeSlider.doubleValue = volume
+        }
     }
 
     internal func formatTime(_ seconds: Double) -> String {

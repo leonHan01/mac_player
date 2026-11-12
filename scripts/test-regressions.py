@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Run core regressions without XCTest, opening a window, or decoding media."""
 import argparse
+import contextlib
+import importlib.util
+import io
 import os
 from pathlib import Path
 import platform
@@ -36,6 +39,41 @@ def check_packaging(root, scratch):
     print("PASS: DMG staging on a clean checkout (build and image tools stubbed)", flush=True)
 
 
+def check_ffmpeg_portability(root, scratch):
+    specification = importlib.util.spec_from_file_location("ffmpeg_check", root / "scripts/check-ffmpeg-runtime.py")
+    checker = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(checker)
+    architecture = platform.machine()
+    source = scratch / "portable-runtime.c"
+    source.write_text("int main(void) { return 0; }\n")
+    portable = scratch / "portable-runtime"
+    too_new = scratch / "newer-runtime"
+    run(["clang", "-mmacosx-version-min=13.0", str(source), "-o", str(portable)])
+    run(["clang", "-mmacosx-version-min=15.0", str(source), "-o", str(too_new)])
+    library_source = scratch / "external-runtime.c"
+    library_source.write_text("int external_runtime(void) { return 0; }\n")
+    library = scratch / "libexternal-runtime.dylib"
+    run(["clang", "-mmacosx-version-min=13.0", "-dynamiclib", str(library_source),
+         "-install_name", "/opt/homebrew/lib/libexternal-runtime.dylib", "-o", str(library)])
+    source.write_text("extern int external_runtime(void); int main(void) { return external_runtime(); }\n")
+    external = scratch / "externally-linked-runtime"
+    run(["clang", "-mmacosx-version-min=13.0", str(source), str(library), "-o", str(external)])
+    with contextlib.redirect_stdout(io.StringIO()):
+        checker.verify(portable, [architecture], execute=False)
+    for binary, arches, expected in [
+        (external, [architecture], "external library"),
+        (too_new, [architecture], "above the app's"),
+        (portable, ["x86_64" if architecture == "arm64" else "arm64"], "architectures"),
+    ]:
+        try:
+            checker.verify(binary, arches, execute=False)
+        except RuntimeError as error:
+            assert expected in str(error), error
+        else:
+            raise AssertionError(f"Non-portable clip runtime was accepted: {binary}")
+    print("PASS: FFmpeg packaging rejects external libraries, newer macOS requirements, and mismatched architectures", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--module-cache", type=Path, help="Reuse an existing Swift module cache")
@@ -43,7 +81,13 @@ def main():
     root = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory(prefix="myplayer-regressions-") as temporary:
         scratch = Path(temporary).resolve()
+        fixtures = scratch / "fixtures"
+        fixtures.mkdir()
+        clip_encoder = fixtures / "fake-ffmpeg"
+        shutil.copy2(root / "Tests/Fixtures/fake-ffmpeg.py", clip_encoder)
+        clip_encoder.chmod(0o755)
         check_packaging(root, scratch)
+        check_ffmpeg_portability(root, scratch)
         cache = args.module_cache or scratch / "module-cache"
         common = ["-swift-version", "6", "-module-cache-path", str(cache),
                   "-target", f"{platform.machine()}-apple-macosx13.0"]

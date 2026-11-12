@@ -2,6 +2,10 @@ import AppKit
 
 extension PlayerView {
     func controlTextDidEndEditing(_ notification: Notification) {
+        if let field = notification.object as? NSTextField, field === clipStartField || field === clipEndField {
+            commitClipTimes()
+            return
+        }
         updateTagControls()
     }
 
@@ -23,7 +27,7 @@ extension PlayerView {
 
         let url = playerController.playlistURLs[row]
         let isCurrent = playerController.currentPlaylistIndex.map { $0 == row } ?? false
-        cell.configure(url: url, index: row, isCurrent: isCurrent)
+        cell.configure(url: url, index: row, isCurrent: isCurrent, fileSize: playerController.playlistFileSize(for: url))
         return cell
     }
 
@@ -48,6 +52,14 @@ extension PlayerView {
         openFolderAction()
     }
 
+    @objc internal func screenshotButtonPressed(_ sender: NSButton) {
+        screenshotAction()
+    }
+
+    @objc internal func trimVideoButtonPressed(_ sender: NSButton) {
+        trimVideoAction()
+    }
+
     @objc internal func togglePlaylistButtonPressed(_ sender: NSButton) {
         guard playerController.hasPlaylist else { return }
         isPlaylistCollapsed.toggle()
@@ -59,7 +71,7 @@ extension PlayerView {
     }
 
     @objc internal func playPauseButtonPressed(_ sender: NSButton) {
-        playerController.togglePlayPause()
+        togglePlayback()
     }
 
     @objc internal func nextButtonPressed(_ sender: NSButton) {
@@ -152,6 +164,15 @@ extension PlayerView {
         isSeeking = true
         playerController.seek(to: sender.doubleValue)
         isSeeking = false
+        updateProgress()
+    }
+
+    internal func beginSeeking() {
+        playerController.beginSeeking()
+    }
+
+    internal func finishSeeking() {
+        playerController.finishSeeking()
         updateProgress()
     }
 

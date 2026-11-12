@@ -9,10 +9,15 @@ final class SettingsWindowController: NSWindowController {
     private let languagePopup = NSPopUpButton()
     private let statusLabel = NSTextField(labelWithString: "")
     private let doneButton = NSButton(title: "", target: nil, action: nil)
+    private let screenshotLabel = NSTextField(labelWithString: "")
+    private let screenshotPath = NSTextField(labelWithString: "")
+    private let screenshotDefaultLabel = NSTextField(labelWithString: "")
+    private let chooseScreenshotFolder = NSButton()
+    private let resetScreenshotFolder = NSButton()
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 260),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -20,8 +25,8 @@ final class SettingsWindowController: NSWindowController {
         window.appearance = NSAppearance(named: .aqua)
         window.backgroundColor = AppTheme.windowBackground
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 440, height: 260)
-        window.maxSize = NSSize(width: 440, height: 260)
+        window.minSize = window.frame.size
+        window.maxSize = window.frame.size
         super.init(window: window)
         configureContent(in: window)
         applyLanguage()
@@ -38,6 +43,11 @@ final class SettingsWindowController: NSWindowController {
         statusLabel.stringValue = AppStrings.languageChangesImmediately
         doneButton.title = AppStrings.done
         stylePrimaryButton(doneButton)
+        screenshotLabel.stringValue = AppStrings.screenshotLocation
+        screenshotDefaultLabel.stringValue = AppStrings.screenshotDefaultLocation
+        chooseScreenshotFolder.title = AppStrings.chooseFolder
+        resetScreenshotFolder.title = AppStrings.restoreDefault
+        refreshScreenshotPath()
 
         languagePopup.removeAllItems()
         for language in AppLanguage.allCases {
@@ -59,6 +69,34 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func close(_ sender: Any?) {
         window?.performClose(sender)
+    }
+
+    private func refreshScreenshotPath() {
+        let directory = ScreenshotSettings.shared.directory
+        screenshotPath.stringValue = directory.path
+        screenshotPath.toolTip = directory.path
+        screenshotPath.setAccessibilityLabel(AppStrings.screenshotLocation)
+    }
+
+    @objc private func chooseScreenshotDirectory(_ sender: Any?) {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.title = AppStrings.screenshotLocation
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = ScreenshotSettings.shared.directory
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let directory = panel.url else { return }
+            ScreenshotSettings.shared.setDirectory(directory)
+            self?.refreshScreenshotPath()
+        }
+    }
+
+    @objc private func restoreScreenshotDirectory(_ sender: Any?) {
+        ScreenshotSettings.shared.restoreDefault()
+        refreshScreenshotPath()
     }
 
     private func configureContent(in window: NSWindow) {
@@ -101,6 +139,31 @@ final class SettingsWindowController: NSWindowController {
         content.addSubview(statusLabel)
         content.addSubview(doneButton)
 
+        let screenshotCard = NSView()
+        screenshotCard.wantsLayer = true
+        screenshotCard.layer?.backgroundColor = AppTheme.panelBackground.cgColor
+        screenshotCard.layer?.borderWidth = 1
+        screenshotCard.layer?.borderColor = AppTheme.border.cgColor
+        screenshotCard.layer?.cornerRadius = 10
+        screenshotLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        screenshotPath.font = .systemFont(ofSize: 12)
+        screenshotPath.textColor = AppTheme.secondaryText
+        screenshotPath.lineBreakMode = .byTruncatingMiddle
+        screenshotDefaultLabel.font = .systemFont(ofSize: 12)
+        screenshotDefaultLabel.textColor = AppTheme.secondaryText
+        chooseScreenshotFolder.bezelStyle = .rounded
+        chooseScreenshotFolder.target = self
+        chooseScreenshotFolder.action = #selector(chooseScreenshotDirectory(_:))
+        resetScreenshotFolder.bezelStyle = .rounded
+        resetScreenshotFolder.target = self
+        resetScreenshotFolder.action = #selector(restoreScreenshotDirectory(_:))
+        content.addSubview(screenshotCard)
+        screenshotCard.translatesAutoresizingMaskIntoConstraints = false
+        for view in [screenshotLabel, screenshotPath, screenshotDefaultLabel, chooseScreenshotFolder, resetScreenshotFolder] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            screenshotCard.addSubview(view)
+        }
+
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
             titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
@@ -119,7 +182,24 @@ final class SettingsWindowController: NSWindowController {
             languagePopup.centerYAnchor.constraint(equalTo: languageLabel.centerYAnchor),
             languagePopup.widthAnchor.constraint(equalToConstant: 128),
             statusLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 12),
+            screenshotCard.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            screenshotCard.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            screenshotCard.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 16),
+            screenshotCard.heightAnchor.constraint(equalToConstant: 132),
+            screenshotLabel.leadingAnchor.constraint(equalTo: screenshotCard.leadingAnchor, constant: 16),
+            screenshotLabel.topAnchor.constraint(equalTo: screenshotCard.topAnchor, constant: 16),
+            chooseScreenshotFolder.trailingAnchor.constraint(equalTo: screenshotCard.trailingAnchor, constant: -16),
+            chooseScreenshotFolder.centerYAnchor.constraint(equalTo: screenshotLabel.centerYAnchor),
+            screenshotLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseScreenshotFolder.leadingAnchor, constant: -12),
+            screenshotPath.leadingAnchor.constraint(equalTo: screenshotLabel.leadingAnchor),
+            screenshotPath.trailingAnchor.constraint(equalTo: screenshotCard.trailingAnchor, constant: -16),
+            screenshotPath.topAnchor.constraint(equalTo: screenshotLabel.bottomAnchor, constant: 12),
+            resetScreenshotFolder.trailingAnchor.constraint(equalTo: chooseScreenshotFolder.trailingAnchor),
+            resetScreenshotFolder.bottomAnchor.constraint(equalTo: screenshotCard.bottomAnchor, constant: -12),
+            screenshotDefaultLabel.leadingAnchor.constraint(equalTo: screenshotLabel.leadingAnchor),
+            screenshotDefaultLabel.centerYAnchor.constraint(equalTo: resetScreenshotFolder.centerYAnchor),
+            screenshotDefaultLabel.trailingAnchor.constraint(lessThanOrEqualTo: resetScreenshotFolder.leadingAnchor, constant: -8),
+            statusLabel.topAnchor.constraint(equalTo: screenshotCard.bottomAnchor, constant: 12),
             doneButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
             doneButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
             doneButton.widthAnchor.constraint(equalToConstant: 88),

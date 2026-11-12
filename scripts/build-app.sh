@@ -14,8 +14,15 @@ ICON_SOURCE="$ROOT_DIR/播放器.png"
 ICONSET_DIR="$ROOT_DIR/build/AppIcon.iconset"
 ICON_FILE="$RESOURCES_DIR/AppIcon.icns"
 IINA_RUNTIME_DIR="${IINA_RUNTIME_DIR:-$ROOT_DIR/Vendor/IINAFrameworks}"
+FFMPEG_RUNTIME_DIR="${FFMPEG_RUNTIME_DIR:-$ROOT_DIR/Vendor/FFmpeg}"
+APP_DEBUG_INFO_FORMAT="${APP_DEBUG_INFO_FORMAT:-dwarf}"
 THIRD_PARTY_NOTICES="$ROOT_DIR/THIRD_PARTY_NOTICES.md"
 LICENSE_FILE="$ROOT_DIR/LICENSE"
+
+if [[ ! -x "$FFMPEG_RUNTIME_DIR/bin/ffmpeg" ]]; then
+    echo "Missing standalone FFmpeg. Run python3 scripts/build-ffmpeg-runtime.py first." >&2
+    exit 1
+fi
 
 cd "$ROOT_DIR"
 export CLANG_MODULE_CACHE_PATH="$ROOT_DIR/.build/module-cache"
@@ -24,7 +31,10 @@ swift build \
     --disable-sandbox \
     --cache-path "$ROOT_DIR/.build/swiftpm-cache" \
     -Xcc "-fmodules-cache-path=$ROOT_DIR/.build/module-cache" \
-    -c release
+    -c release -debug-info-format "$APP_DEBUG_INFO_FORMAT"
+
+python3 "$ROOT_DIR/scripts/package-ffmpeg-runtime.py" \
+    --runtime "$FFMPEG_RUNTIME_DIR" --app-binary "$ROOT_DIR/.build/release/$APP_NAME"
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$CONTENTS_DIR/Frameworks"
@@ -56,6 +66,8 @@ if ! iconutil -c icns "$ICONSET_DIR" -o "$ICON_FILE" >/dev/null 2>&1; then
     python3 "$ROOT_DIR/scripts/make-icns.py" "$ICONSET_DIR" "$ICON_FILE"
 fi
 ditto "$IINA_RUNTIME_DIR" "$CONTENTS_DIR/Frameworks"
+python3 "$ROOT_DIR/scripts/package-ffmpeg-runtime.py" \
+    --runtime "$FFMPEG_RUNTIME_DIR" --app-binary "$MACOS_DIR/$APP_NAME" --app "$APP_DIR"
 cp "$THIRD_PARTY_NOTICES" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
 cp "$LICENSE_FILE" "$RESOURCES_DIR/LICENSE"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$APP_NAME"

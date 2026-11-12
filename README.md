@@ -14,10 +14,13 @@ Mac Video Player keeps local viewing simple: open a video or folder, browse the 
 
 - **Native light appearance** — a calm macOS-style interface with a large video canvas and a circular play/pause button.
 - **Local libraries** — open an MP4, MOV, M4V, or MKV file, or scan a folder to build a playlist automatically.
-- **Collapsible playlist** — hide the playlist with the sidebar button to give the video more room, then restore it without losing the current selection.
+- **Collapsible playlist** — see each video's format and file size, hide the playlist with the sidebar button to give the video more room, then restore it without losing the current selection.
 - **Tags that stay local** — add, remove, and filter tags from the player or the tag editor. Tags are stored separately as JSON and never modify the media file.
 - **English and Simplified Chinese** — choose the interface language in **Mac Video Player > Settings…**. The change applies immediately and is remembered.
 - **Playback controls** — sequential or shuffle playback, timeline seeking, volume control, Previous and Next, drag-and-drop opening, Finder reveal, and screenshot capture.
+- **Non-blocking playback errors** — damaged, unreadable, or undecodable videos show a brief message inside the player. You can keep navigating and using shortcuts; hover over the message for details.
+- **Video screenshots** — click **Screenshot** in the title bar or press `⌘⇧S` to save the current frame as a PNG while playing or paused, with a customizable shortcut.
+- **Video clips** — choose a start and end using sliders, precise timestamps, or the current playback position, then export a new MP4 with cancellation support.
 - **Faster long seeks** — Left and Right Arrow seek by five seconds. Hold either key for more than five seconds to increase each repeated seek by 150% (12.5 seconds per repeat).
 
 ## Language settings
@@ -33,6 +36,10 @@ Open **Mac Video Player > Settings…**, select **English** or **简体中文**,
 | Input | Action |
 | --- | --- |
 | `Space` | Play or pause |
+| `⌘⇧S` | Capture the current video frame |
+| `⌘⇧E` | Enter or exit trim mode |
+| `I` / `O` in trim mode | Set the current position as the start / end |
+| `Esc` in trim mode | Exit trim mode |
 | `Up Arrow` / `Down Arrow` | Previous or next video |
 | `Left Arrow` / `Right Arrow` | Seek backward or forward 5 seconds |
 | Hold `Left Arrow` / `Right Arrow` for over 5 seconds | Seek 12.5 seconds per repeated key event |
@@ -40,6 +47,18 @@ Open **Mac Video Player > Settings…**, select **English** or **简体中文**,
 | Scroll over the volume slider | Adjust volume |
 
 The playlist panel keeps its own normal scrolling. Use the sidebar toggle in the upper-right corner of the player to collapse or reopen it.
+
+Screenshots are saved directly to **Downloads** (`~/Downloads/`) by default, with a confirmation after saving. Choose another folder or restore Downloads in **Mac Video Player > Settings… > Screenshot Location**. The change applies immediately and persists across restarts. You can also choose **File > Capture Screenshot**. Change the shortcut or restore its default in **Mac Video Player > Screenshot Shortcut…**. The shortcut works while the player is active, and the Screenshot button's tooltip shows the current shortcut.
+
+## Video clips
+
+Open a video and click **Trim Video** or press `⌘⇧E` to enter **trim mode in the main player**. Playback pauses and the progress bar becomes a range timeline. Drag the left blue handle to set the start and the right handle to set the end; the blue section is the exported range. Click or drag elsewhere on the track to seek. Dragging previews frames in the video canvas, with an exact seek on release.
+
+The toolbar shows start, end, and clip duration. Enter `HH:MM:SS.mmm`, `MM:SS.mmm`, or seconds for precise adjustments, or seek and choose **Set Start** / **Set End** (`I` / `O`). **Preview** or Space plays from the selected start and pauses at the end. Seeking to the source's last frame stays on that video. Choose **Exit Trim**, press `Esc`, or press `⌘⇧E` again to restore normal controls. Press Return to commit a time edit before using keyboard mode controls.
+
+Choose **Export MP4…** to select the filename and destination; while exporting it becomes **Cancel Export**. After export, the folder button reveals the clip in Finder. Switching videos or exiting trim mode cancels the current export. Every export captures its source and confirmed range, protects the source and existing destinations on failure or cancellation, removes temporary output, and is cancelled before quitting.
+
+The app includes standalone FFmpeg with statically linked FFmpeg/x264 libraries. Clips use H.264 video and AAC audio and support sources such as MKV. Copy the complete application to another compatible Mac to export clips without installing FFmpeg or Homebrew. The current application bundle targets Apple Silicon (arm64) and macOS 13.0 or later.
 
 ## Tags
 
@@ -58,6 +77,7 @@ Tags are stored at:
 - macOS 13.0 or later
 - Swift 6 and the macOS Command Line Tools
 - The IINA/libmpv runtime in `Vendor/IINAFrameworks`
+- Standalone FFmpeg in `Vendor/FFmpeg/bin/ffmpeg`, with its sources, licenses, and build metadata alongside it
 
 If the runtime is absent, install IINA and import its Frameworks directory:
 
@@ -71,7 +91,13 @@ Set `IINA_APP` if IINA is installed outside `/Applications/IINA.app`:
 IINA_APP="/path/to/IINA.app" ./scripts/fetch-iina-runtime.sh
 ```
 
-Build the app bundle:
+The vendored FFmpeg is ready for packaging. To rebuild it from the supplied source archives, run the following command. It builds entirely inside the project and needs no Homebrew or system installation:
+
+```sh
+python3 scripts/build-ffmpeg-runtime.py --jobs 4
+```
+
+Build the app bundle (also checking FFmpeg architecture, deployment target, encoders, and external dynamic-library dependencies):
 
 ```sh
 ./scripts/build-app.sh
@@ -82,6 +108,8 @@ The bundle is written to `build/MacVideoPlayer.app`. Create a DMG with:
 ```sh
 ./scripts/build-dmg.sh
 ```
+
+If a restricted environment cannot generate debug symbols, build with `APP_DEBUG_INFO_FORMAT=none ./scripts/build-app.sh`.
 
 ## Verification
 
@@ -101,6 +129,15 @@ They cover language persistence, tag entry and input-method behavior, playlist f
 
 Performance regressions also cover background tag writes, concurrent edits and failure recovery, skipped unchanged saves, cached sort orders, scan cancellation, deletion during scanning, and paused progress updates. If an OpenGL pixel format is unavailable, the script reports the hidden-window input checks as skipped and continues with the core checks.
 
+Clip export regressions use a simulated encoder to check timestamp entry, range validation, encoder arguments, cancellation, source and destination protection, retries, and temporary-file cleanup without processing real media.
+They also verify bundled-encoder priority, app relocation, an empty PATH, and failure without machine-local fallback when the helper is missing or non-executable.
+
+After building, test real exports from the application bundle. This copies and renames the app, removes Homebrew from PATH, and checks MP4/MKV clips, audio, and selected timestamps with tiny synthetic media. It never opens the player window:
+
+```sh
+python3 scripts/test-bundled-ffmpeg.py
+```
+
 Checks also cover coalesced playback-event bursts, natural sort equivalence, and tag collection deduplication. Run the scanning and tag benchmarks without launching the player:
 
 ```sh
@@ -111,7 +148,7 @@ The benchmark uses temporary files and synthetic tags, reports the median of fiv
 
 ## Runtime and license
 
-The packaged application includes IINA/libmpv and related media dependencies. It decodes the original file directly, supports hardware decoding where available, and does not remux or transcode media.
+The packaged application includes IINA/libmpv, standalone FFmpeg/x264, and related media dependencies. Playback decodes the original file directly and supports hardware decoding where available. Clip export uses the separate bundled tool to write the selected range to a new MP4 file. FFmpeg's corresponding sources, licenses, and build recipes are included in `Contents/Resources/FFmpeg`.
 
 Because distributed builds include the IINA/libmpv runtime, this project is licensed under the GNU General Public License v3.0. Keep the corresponding source and third-party notices available when redistributing.
 

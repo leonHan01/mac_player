@@ -119,6 +119,27 @@ extension RegressionChecks {
         expect(state.activeTagFilter == nil && state.urls == files && restoredSelection.retainedCurrentVideo,
                "Clearing a filter must restore the full scope and retain the current video")
         expect(state.scopeRevision == 1, "Sorting and filtering must not increment the source-scope revision")
+
+        let unchangedRevision = state.revision
+        _ = try state.applyTagFilter("All match") { _, _ in true }
+        _ = try state.applyTagFilter("All match") { _, _ in true }
+        expect(state.activeTagFilter == "All match" && state.revision == unchangedRevision
+               && state.currentURL == files[3],
+               "Updating a filter without changing rows must retain selection and avoid a full table reload")
+        _ = try state.applyTagFilter(nil) { _, _ in false }
+        expect(state.activeTagFilter == nil && state.revision == unchangedRevision,
+               "Clearing an all-matching filter must update the filter without invalidating rows")
+
+        _ = try state.applyTagFilter("One") { url, _ in url == files[3] }
+        expect(state.revision == unchangedRevision + 1 && state.urls == [files[3]],
+               "A filter that changes membership must still invalidate the table")
+        _ = try state.toggleSortMode { url, _ in url == files[3] }
+        expect(state.sortMode == .sizeDescending && state.revision == unchangedRevision + 1,
+               "Sorting a one-row selection must change the mode without reloading unchanged content")
+        _ = try state.applyTagFilter(nil) { _, _ in false }
+        expect(state.revision == unchangedRevision + 2 && state.urls == Array(files.reversed())
+               && state.currentURL == files[3],
+               "Restoring the full list must refresh rows in the chosen order and preserve selection")
         print("PASS: pure playlist filtering, selection preservation, and filter/sort rollback")
     }
 

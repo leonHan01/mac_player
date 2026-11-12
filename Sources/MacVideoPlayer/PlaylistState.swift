@@ -8,6 +8,7 @@ struct PlaylistState {
     }
 
     private var playlistsBySortMode: [SortMode: [URL]] = [:]
+    private var fileSizes: [URL: Int64] = [:]
     private var selectedIndex = 0
     private var playbackHistory: [Int] = []
 
@@ -23,6 +24,8 @@ struct PlaylistState {
     var scopeURLs: [URL] { playlistsBySortMode[sortMode] ?? [] }
     var currentIndex: Int? { urls.indices.contains(selectedIndex) ? selectedIndex : nil }
     var currentURL: URL? { currentIndex.map { urls[$0] } }
+
+    func fileSize(for url: URL) -> Int64? { fileSizes[url] }
 
     var hasPrevious: Bool {
         switch playbackMode {
@@ -58,6 +61,9 @@ struct PlaylistState {
         }
 
         playlistsBySortMode = orders
+        fileSizes = removedPaths.isEmpty ? result.fileSizes : result.fileSizes.filter {
+            !removedPaths.contains($0.key.standardizedFileURL.path)
+        }
         scopeRevision &+= 1
         urls = loadedURLs
         revision &+= 1
@@ -130,6 +136,9 @@ struct PlaylistState {
     mutating func remove(_ url: URL) -> URL? {
         let previousURL = currentURL
         let removedPath = url.standardizedFileURL.path
+        if let sizeURL = fileSizes.keys.first(where: { $0.standardizedFileURL.path == removedPath }) {
+            fileSizes.removeValue(forKey: sizeURL)
+        }
         for mode in SortMode.allCases {
             playlistsBySortMode[mode]?.removeAll { $0.standardizedFileURL.path == removedPath }
         }
@@ -171,14 +180,22 @@ struct PlaylistState {
         // filter, sort choice, navigation history, and revision.
         self.sortMode = sortMode
         activeTagFilter = tagFilter
-        urls = filteredURLs
-        revision &+= 1
+        // Tags or the selected sort mode can change without changing any rows.
+        // Keep the content revision stable so the view can reuse its table.
+        if urls != filteredURLs {
+            urls = filteredURLs
+            revision &+= 1
+        }
         selectedIndex = retainedIndex ?? 0
         playbackHistory.removeAll()
         return RebuiltSelection(url: urls[selectedIndex], retainedCurrentVideo: retainedIndex != nil)
     }
 
     private static func index(of url: URL, in urls: [URL]) -> Int? {
+        // Cached sort orders and filters retain the URLs from the same scan.
+        // Avoid normalizing thousands of paths just to retain that selection.
+        if let index = urls.firstIndex(of: url) { return index }
+        // An explicitly opened file may use an equivalent spelling (e.g. ../).
         let path = url.standardizedFileURL.path
         return urls.firstIndex { $0.standardizedFileURL.path == path }
     }

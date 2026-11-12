@@ -21,6 +21,7 @@ static int read_index, write_index, command_count, awaiting_reply;
 static int wait_count;
 static uint64_t command_id;
 static char last_command[4][4096];
+static char initial_volume[64], initial_mute[64];
 static void (*wakeup)(void *);
 static void *wakeup_context;
 
@@ -35,12 +36,20 @@ static void notify(void) { if (wakeup) wakeup(wakeup_context); }
 void *mpv_create(void) {
     read_index = write_index = command_count = awaiting_reply = 0;
     wait_count = 0;
+    initial_volume[0] = initial_mute[0] = 0;
     wakeup = NULL;
     return (void *)1;
 }
 int mpv_initialize(void *p) { return 0; }
 void mpv_destroy(void *p) { wakeup = NULL; }
-int mpv_set_option_string(void *p, const char *key, const char *value) { return 0; }
+int mpv_set_option_string(void *p, const char *key, const char *value) {
+    if (!strcmp(key, "volume")) snprintf(initial_volume, sizeof(initial_volume), "%s", value);
+    if (!strcmp(key, "mute")) snprintf(initial_mute, sizeof(initial_mute), "%s", value);
+    return 0;
+}
+const char *fake_initial_option(const char *key) {
+    return !strcmp(key, "volume") ? initial_volume : initial_mute;
+}
 int mpv_observe_property(void *p, uint64_t id, const char *key, int format) { return 0; }
 void mpv_set_wakeup_callback(void *p, void (*callback)(void *), void *context) {
     wakeup = callback;

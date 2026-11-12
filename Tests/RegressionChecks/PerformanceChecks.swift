@@ -55,6 +55,163 @@ private final class TagWriterProbe: @unchecked Sendable {
 }
 
 extension RegressionChecks {
+    static func checkEarlyVideoOpen(_ root: URL) async throws {
+        let folder = root.appendingPathComponent("early-open", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let first = folder.appendingPathComponent("a.mp4")
+        let second = folder.appendingPathComponent("b.mp4")
+        try Data().write(to: first)
+        try Data(repeating: 0, count: 16).write(to: second)
+        let gate = OperationGate()
+        let controller = PlayerController(scan: { url, mode in
+            try gate.block()
+            return try VideoFileScanner.buildLoadResult(for: url, sortMode: mode)
+        }, prepareFile: { try VideoFileScanner.prepareExplicitFile(for: $0, sortMode: $1) })
+        defer { controller.shutdown() }
+        // No renderer is attached: reaching its existing error boundary records
+        // a real playback-start attempt without starting libmpv or an OpenGL view.
+        var playbackAttempts: [URL] = []
+        controller.onLoadFailed = { url, error in
+            if case MPVPlaybackError.runtimeMissing = error { playbackAttempts.append(url) }
+        }
+        var starts = gate.started.makeAsyncIterator()
+        controller.load(url: first)
+        await starts.next()
+        expect(controller.currentVideoURL == first && playbackAttempts == [first],
+               "An explicit video must reach playback before its sibling-folder scan finishes")
+        expect(controller.isLoading && !controller.isLoadingPlayback,
+               "Background enumeration must not cover the video or disable its playback controls")
+        let tags = TagStore(storeURL: root.appendingPathComponent("early-open-tags.json"))
+        controller.toggleSortMode(tagStore: tags)
+        let beforeExpansion = playbackAttempts.count
+        await withCheckedContinuation { continuation in
+            controller.onLoadingChanged = { if !controller.isLoading { continuation.resume() } }
+            gate.release()
+        }
+        expect(controller.playlistURLs == [second, first] && controller.currentVideoURL == first,
+               "Background list expansion must retain the playing file and latest sort choice")
+        expect(playbackAttempts.count == beforeExpansion,
+               "Finishing a sibling scan must not reopen or restart the selected video")
+        print("PASS: explicit playback starts before scanning, list expansion retains selection without restarting")
+    }
+
+    static func checkEarlyVideoOpenRaces(_ root: URL) async throws {
+        let folder = root.appendingPathComponent("early-open-races", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let first = folder.appendingPathComponent("a.mp4")
+        let second = folder.appendingPathComponent("b.mp4")
+        for url in [first, second] { try Data().write(to: url) }
+
+        let oldScan = OperationGate()
+        let (oldFinished, finishOld) = AsyncStream.makeStream(of: Void.self)
+        let controller = PlayerController(scan: { url, mode in
+            if url == first {
+                defer { finishOld.yield(()) }
+                try oldScan.block()
+                return try VideoFileScanner.buildLoadResult(for: url, sortMode: mode)
+            }
+            return try VideoFileScanner.buildLoadResult(for: url, sortMode: mode)
+        }, prepareFile: { try VideoFileScanner.prepareExplicitFile(for: $0, sortMode: $1) })
+        defer { controller.shutdown() }
+        var attempts: [URL] = []
+        controller.onLoadFailed = { url, error in
+            if case MPVPlaybackError.runtimeMissing = error { attempts.append(url) }
+        }
+        var starts = oldScan.started.makeAsyncIterator()
+        var finished = oldFinished.makeAsyncIterator()
+        controller.load(url: first)
+        await starts.next()
+        await load(controller, second)
+        oldScan.release()
+        await finished.next()
+        await settle()
+        expect(controller.currentVideoURL == second && attempts == [first, second],
+               "A superseded scan must not restart or replace the newer video")
+
+        let failedScan = OperationGate()
+        let failureController = PlayerController(scan: { _, _ in
+            try failedScan.block()
+            throw FixtureError.fileOperationFailed
+        }, prepareFile: { try VideoFileScanner.prepareExplicitFile(for: $0, sortMode: $1) })
+        defer { failureController.shutdown() }
+        var scanErrors = 0
+        failureController.onLoadFailed = { _, error in
+            if case FixtureError.fileOperationFailed = error { scanErrors += 1 }
+        }
+        var failedStarts = failedScan.started.makeAsyncIterator()
+        failureController.load(url: first)
+        await failedStarts.next()
+        await withCheckedContinuation { continuation in
+            failureController.onLoadingChanged = { if !failureController.isLoading { continuation.resume() } }
+            failedScan.release()
+        }
+        expect(failureController.currentVideoURL == first && failureController.playlistURLs == [first]
+               && scanErrors == 1 && !failureController.isLoadingPlayback,
+               "A sibling-scan failure must preserve the already selected video and release loading state")
+
+        let deletedScan = OperationGate()
+        let deletionController = PlayerController(scan: { url, mode in
+            let snapshot = try VideoFileScanner.buildLoadResult(for: url, sortMode: mode)
+            try deletedScan.block()
+            return snapshot
+        }, prepareFile: { try VideoFileScanner.prepareExplicitFile(for: $0, sortMode: $1) }, trash: { url in
+            try FileManager.default.moveItem(at: url, to: root.appendingPathComponent("early-open-deleted.mp4"))
+        })
+        defer { deletionController.shutdown() }
+        let tags = TagStore(storeURL: root.appendingPathComponent("early-open-race-tags.json"))
+        var deletedStarts = deletedScan.started.makeAsyncIterator()
+        deletionController.load(url: first)
+        await deletedStarts.next()
+        try await deletionController.deleteVideo(at: first, tagStore: tags)
+        await withCheckedContinuation { continuation in
+            deletionController.onLoadingChanged = { if !deletionController.isLoading { continuation.resume() } }
+            deletedScan.release()
+        }
+        expect(deletionController.currentVideoURL == second && deletionController.playlistScopeURLs == [second],
+               "Expansion must exclude a deleted initial video and select a surviving sibling")
+        print("PASS: early-open replacement, scan failure, and deletion while expanding siblings")
+    }
+
+    static func checkTagLoadNormalization(_ root: URL) async throws {
+        let storeURL = root.appendingPathComponent("repeated-tag-load.json")
+        let urls = (0..<1_000).map { root.appendingPathComponent("tag-load/video-\($0).mp4") }
+        let raw = [" Work ", "work", "旅行", "旅行", "", " \n ", " Review"]
+        let expected = ["Work", "旅行", "Review"].sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+        var records = Dictionary(uniqueKeysWithValues: urls.map { ($0.standardizedFileURL.path, raw) })
+        // Include more distinct combinations than a small startup cache holds.
+        let distinct = (0..<400).map { root.appendingPathComponent("tag-load/distinct-\($0).mp4") }
+        for (index, url) in distinct.enumerated() {
+            records[url.standardizedFileURL.path] = [" Tag \(index) ", "tag \(index)"]
+        }
+        let lowerCase = root.appendingPathComponent("tag-load/lower-case.mp4")
+        records[lowerCase.standardizedFileURL.path] = ["work", " Work "]
+        try JSONEncoder().encode(records).write(to: storeURL)
+        let originalData = try Data(contentsOf: storeURL)
+        let store = TagStore(storeURL: storeURL)
+        expect(store.loadError == nil, "Repeated tag combinations must load successfully")
+        for url in urls {
+            expect(store.tags(for: url) == expected,
+                   "Loading shared tags must trim, deduplicate, retain first spelling, and sort")
+        }
+        for (index, url) in distinct.enumerated() {
+            expect(store.tags(for: url) == ["Tag \(index)"],
+                   "Distinct tag combinations must normalize correctly beyond the cache limit")
+        }
+        expect(store.tags(for: lowerCase) == ["work"],
+               "Different raw tag combinations must preserve their own first spelling")
+        let unchangedData = try Data(contentsOf: storeURL)
+        expect(originalData == unchangedData, "Startup normalization must not rewrite the database")
+        try await store.addTag("Only first", for: urls[0])
+        expect(store.tags(for: urls[0]).contains("Only first") && store.tags(for: urls[1]) == expected,
+               "Editing one file must not modify other files sharing the same normalized tags")
+        let reopened = TagStore(storeURL: storeURL)
+        expect(reopened.tags(for: urls[0]) == store.tags(for: urls[0]) && reopened.tags(for: urls[1]) == expected,
+               "Shared normalization must preserve independent records after saving and reopening")
+        print("PASS: repeated/distinct startup tags, normalization, spelling, and independent edits")
+    }
+
     static func checkTagCollection(_ root: URL) async throws {
         let first = root.appendingPathComponent("tag-collection/one.mp4")
         let second = root.appendingPathComponent("tag-collection/two.mp4")

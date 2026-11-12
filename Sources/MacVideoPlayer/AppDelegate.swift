@@ -57,8 +57,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             deleteAction: { [weak self] in
                 self?.deleteCurrentVideo(nil)
+            },
+            screenshotAction: { [weak self] in
+                self?.captureScreenshot(nil)
+            },
+            trimVideoAction: { [weak self] in
+                self?.trimVideo(nil)
             }
         )
+        playerWindow.updateScreenshotShortcut(screenshotShortcutStore.shortcut)
         playerWindow.center()
         playerWindow.makeKeyAndOrderFront(nil)
         window = playerWindow
@@ -81,10 +88,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard libraryActions.hasPendingOperations else {
+        guard libraryActions.hasPendingOperations || window?.isExportingClip == true else {
             return .terminateNow
         }
         Task { [self] in
+            await window?.cancelAndWaitForClipExport()
             let canTerminate = await libraryActions.waitForPendingOperations()
             sender.reply(toApplicationShouldTerminate: canTerminate)
         }
@@ -145,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePlayPause(_ sender: Any?) {
-        playerController.togglePlayPause()
+        window?.togglePlayPause()
     }
 
     @objc private func captureScreenshot(_ sender: Any?) {
@@ -157,6 +165,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 showScreenshotError(error)
             }
         }
+    }
+
+    @objc private func trimVideo(_ sender: Any?) {
+        window?.toggleClipMode()
     }
 
     @objc private func configureScreenshotShortcut(_ sender: Any?) {
@@ -296,7 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         libraryActions.perform(.deleteVideo(url)) { [self] result in
             defer { isDeletingVideo = false }
             if case let .failure(failure) = result {
-                showPlaybackError(for: url, error: failure.underlyingError)
+                let reason = failure.underlyingError.localizedDescription
+                window?.showNotification(reason, detail: "\(url.path)\n\(reason)")
             }
         }
     }
@@ -322,12 +335,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPlaybackError(for url: URL, error: Error) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = AppStrings.cannotOpenVideo
-        alert.informativeText = AppStrings.cannotOpenVideoMessage(url.lastPathComponent, error: error.localizedDescription)
-        alert.addButton(withTitle: AppStrings.ok)
-        alert.runModal()
+        window?.showNotification(
+            AppStrings.playbackFailureNotice(url.lastPathComponent),
+            detail: AppStrings.cannotOpenVideoMessage(url.lastPathComponent, error: error.localizedDescription)
+        )
     }
 
     private func showTagError(_ error: Error) {
@@ -340,12 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showScreenshotError(_ error: Error) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = AppStrings.cannotCaptureScreenshot
-        alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: AppStrings.ok)
-        alert.runModal()
+        window?.showNotification(AppStrings.cannotCaptureScreenshot, detail: error.localizedDescription)
     }
 
     private func makeMenu() -> NSMenu {
@@ -423,6 +429,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(screenshotMenuItem)
         self.screenshotMenuItem = screenshotMenuItem
         refreshScreenshotMenuShortcut()
+        let trimItem = fileMenu.addItem(withTitle: AppStrings.trimVideo + "…", action: #selector(trimVideo(_:)), keyEquivalent: "e")
+        trimItem.target = self
+        trimItem.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(
             withTitle: AppStrings.menuToggleShuffle,
             action: #selector(togglePlaybackMode(_:)),
@@ -460,5 +469,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         screenshotMenuItem?.keyEquivalent = shortcut.key
         screenshotMenuItem?.keyEquivalentModifierMask = shortcut.modifiers
         screenshotMenuItem?.toolTip = "\(AppStrings.screenshotShortcutTooltip) (\(shortcut.displayString))"
+        window?.updateScreenshotShortcut(shortcut)
     }
 }

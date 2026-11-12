@@ -114,8 +114,15 @@ private struct PendingMPVLoad {
 private struct PendingMPVSeek {
     let id = UUID()
     let target: Double
+    let isPreview: Bool
     var accepted = false
     var receivedPosition = false
+}
+
+private struct MPVPropertyChanges {
+    var progress = false
+    var state = false
+    var pause = false
 }
 
 private typealias MPVGetOpenGLProcAddress = @convention(c) (
@@ -161,6 +168,8 @@ final class MPVPlayback: NSObject {
     nonisolated private let eventRequestCoordinator = MPVCallbackCoordinator()
     private var requestedLoad: PendingMPVLoad?
     private var pendingSeek: PendingMPVSeek?
+    private var isInteractiveSeek = false
+    private var interactiveSeekTarget: Double?
     private var seekRecoveryTimer: Timer?
     private var cachedTime = 0.0
     private var cachedDuration = 0.0
@@ -214,7 +223,9 @@ final class MPVPlayback: NSObject {
     /// sequences to be checked without creating a window or decoding a video.
     func loadMedia(url: URL) throws {
         try ensurePlayer()
+        clearInteractiveSeek()
         clearPendingSeek()
+        commandQueue?.discardPendingSeeks()
         nextLoadGeneration &+= 1
         requestedLoad = PendingMPVLoad(generation: nextLoadGeneration, url: url)
         activeLoad = nil
@@ -247,8 +258,6 @@ final class MPVPlayback: NSObject {
                 self.scheduleRequestedLoad()
             }
         }
-        setVolume(desiredVolume)
-        setMuted(desiredMuted)
         sendCommand(["set", "pause", "no"])
     }
 
@@ -267,14 +276,25 @@ final class MPVPlayback: NSObject {
         onStateChanged?()
     }
 
+    func setKeepOpen(_ enabled: Bool) {
+        sendCommand(["set", "keep-open", enabled ? "always" : "no"])
+    }
+
+    func beginSeeking() {
+        guard hasLoadedMedia else { return }
+        isInteractiveSeek = true
+    }
+
     func seek(to seconds: Double) {
         guard hasLoadedMedia, seconds.isFinite else { return }
         clearPendingSeek()
-        let seek = PendingMPVSeek(target: max(0, seconds))
+        let seek = PendingMPVSeek(target: max(0, seconds), isPreview: isInteractiveSeek)
+        if isInteractiveSeek { interactiveSeekTarget = seek.target }
         pendingSeek = seek
         // The slider refreshes synchronously, while mpv replies later. Keep
         // the user's target separate from the last observed engine position.
-        sendCommand(["seek", String(seek.target), "absolute+exact"]) { [weak self] result in
+        let mode = seek.isPreview ? "absolute+keyframes" : "absolute+exact"
+        sendCommand(["seek", String(seek.target), mode]) { [weak self] result in
             guard let self, self.pendingSeek?.id == seek.id else { return }
             if result < 0 {
                 self.clearPendingSeek()
@@ -285,7 +305,7 @@ final class MPVPlayback: NSObject {
             self.pendingSeek?.accepted = true
             self.finishSeekIfReached()
             if self.currentTime != previousTime { self.onProgressUpdated?() }
-            guard self.pendingSeek?.id == seek.id else { return }
+            guard !seek.isPreview, self.pendingSeek?.id == seek.id else { return }
             // A non-seekable file or discontinuous timestamps may never
             // report the requested position. Do not leave its timeline frozen.
             let timer = Timer(timeInterval: 5, repeats: false) { [weak self] _ in
@@ -301,8 +321,22 @@ final class MPVPlayback: NSObject {
         onProgressUpdated?()
     }
 
+    func finishSeeking() {
+        let finalTarget = interactiveSeekTarget
+        clearInteractiveSeek()
+        // Replace a queued preview with one exact seek, even when the last
+        // preview already replied or landed near the requested position.
+        if let finalTarget { seek(to: finalTarget) }
+        commandQueue?.finishSeeking()
+    }
+
+    private func clearInteractiveSeek() {
+        isInteractiveSeek = false
+        interactiveSeekTarget = nil
+    }
+
     private func finishSeekIfReached() {
-        guard let pendingSeek, pendingSeek.accepted, pendingSeek.receivedPosition,
+        guard let pendingSeek, !pendingSeek.isPreview, pendingSeek.accepted, pendingSeek.receivedPosition,
               abs(cachedTime - pendingSeek.target) <= 1 else { return }
         clearPendingSeek()
     }
@@ -401,6 +435,7 @@ final class MPVPlayback: NSObject {
     }
 
     func shutdown() {
+        clearInteractiveSeek()
         clearPendingSeek()
         progressTimer?.invalidate()
         progressTimer = nil
@@ -496,6 +531,8 @@ final class MPVPlayback: NSObject {
             ("vo", "libmpv"),
             ("gpu-api", "opengl"),
             ("hwdec", "auto-safe"),
+            ("volume", String(desiredVolume * 100)),
+            ("mute", desiredMuted ? "yes" : "no"),
             ("keep-open", "no"),
             ("input-default-bindings", "no"),
             ("msg-level", "all=warn")
@@ -568,11 +605,7 @@ final class MPVPlayback: NSObject {
 
     private func nextScreenshotURL() throws -> URL {
         let fileManager = FileManager.default
-        let picturesDirectory = fileManager.urls(for: .picturesDirectory, in: .userDomainMask).first
-            ?? fileManager.temporaryDirectory
-        let directory = screenshotDirectory ?? picturesDirectory
-            .appendingPathComponent("Mac Video Player", isDirectory: true)
-            .appendingPathComponent("Screenshots", isDirectory: true)
+        let directory = screenshotDirectory ?? ScreenshotSettings.shared.directory
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let formatter = DateFormatter()
@@ -591,7 +624,7 @@ final class MPVPlayback: NSObject {
         }
     }
 
-    private func handleProperty(_ property: MPVPropertyEvent) {
+    private func handleProperty(_ property: MPVPropertyEvent, changes: inout MPVPropertyChanges) {
         guard let rawName = property.name else { return }
         let name = String(cString: rawName)
         switch name {
@@ -613,16 +646,16 @@ final class MPVPlayback: NSObject {
             }
             let changed = previousValue != (isTime ? currentTime : cachedDuration)
             // Paused seeks still update the timeline without a polling timer.
-            if changed, !isPlaying { onProgressUpdated?() }
+            if changed, !isPlaying { changes.progress = true }
         case "pause":
             guard property.format == MPVPropertyFormat.flag, let data = property.data else { return }
             let paused = data.load(as: Int32.self) != 0
             let changed = cachedPaused != paused
             cachedPaused = paused
-            updateProgressTimer()
             if changed {
-                onProgressUpdated?()
-                onStateChanged?()
+                changes.pause = true
+                changes.progress = true
+                changes.state = true
             }
         case "volume":
             guard property.format == MPVPropertyFormat.double, let data = property.data else { return }
@@ -631,13 +664,13 @@ final class MPVPlayback: NSObject {
             let volume = min(max(value / 100, 0), 1)
             guard desiredVolume != volume else { return }
             desiredVolume = volume
-            onStateChanged?()
+            changes.state = true
         case "mute":
             guard property.format == MPVPropertyFormat.flag, let data = property.data else { return }
             let muted = data.load(as: Int32.self) != 0
             guard desiredMuted != muted else { return }
             desiredMuted = muted
-            onStateChanged?()
+            changes.state = true
         default:
             break
         }
@@ -666,7 +699,9 @@ final class MPVPlayback: NSObject {
     }
 
     private func clearLoadedMedia() {
+        clearInteractiveSeek()
         clearPendingSeek()
+        commandQueue?.discardPendingSeeks()
         requestedLoad = nil
         activeLoad = nil
         hasLoadedMedia = false
@@ -707,6 +742,18 @@ final class MPVPlayback: NSObject {
 
     private func drainEvents() {
         guard let runtime, let player else { return }
+        var changes = MPVPropertyChanges()
+        defer {
+            // Consume every property, but publish only the latest values in
+            // this bounded batch. Direct input and load/EOF callbacks remain
+            // synchronous, and a busy producer still yields between batches.
+            if self.player == player {
+                if changes.pause { updateProgressTimer() }
+                if changes.progress { onProgressUpdated?() }
+                // A progress observer can shut down the playback engine.
+                if self.player == player, changes.state { onStateChanged?() }
+            }
+        }
 
         // Yield between batches so a busy producer cannot monopolize the UI.
         for _ in 0..<64 {
@@ -727,7 +774,7 @@ final class MPVPlayback: NSObject {
                 }
             case MPVEventID.propertyChange:
                 if let property = event.data?.assumingMemoryBound(to: MPVPropertyEvent.self).pointee {
-                    handleProperty(property)
+                    handleProperty(property, changes: &changes)
                 }
             default:
                 continue

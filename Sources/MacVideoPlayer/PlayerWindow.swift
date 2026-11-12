@@ -52,7 +52,9 @@ final class PlayerWindow: NSWindow {
         sortAction: @escaping () -> Void,
         seekForwardAction: @escaping (Double) -> Void,
         seekBackwardAction: @escaping (Double) -> Void,
-        deleteAction: @escaping () -> Void
+        deleteAction: @escaping () -> Void,
+        screenshotAction: @escaping () -> Void,
+        trimVideoAction: @escaping () -> Void
     ) {
         self.previousAction = previousAction
         self.nextAction = nextAction
@@ -84,7 +86,9 @@ final class PlayerWindow: NSWindow {
             openFolderAction: openFolderAction,
             previousAction: previousAction,
             nextAction: nextAction,
-            sortAction: sortAction
+            sortAction: sortAction,
+            screenshotAction: screenshotAction,
+            trimVideoAction: trimVideoAction
         )
         playerContentView = playerView
         contentView = playerView
@@ -95,6 +99,20 @@ final class PlayerWindow: NSWindow {
         playerContentView?.applyLanguage()
     }
 
+    func updateScreenshotShortcut(_ shortcut: ScreenshotShortcut) {
+        playerContentView?.updateScreenshotShortcut(shortcut)
+    }
+
+    func showNotification(_ message: String, detail: String? = nil) {
+        playerContentView?.showNotification(message, detail: detail)
+    }
+
+    var isExportingClip: Bool { playerContentView?.isExportingClip == true }
+
+    func toggleClipMode() { playerContentView?.toggleClipMode() }
+    func togglePlayPause() { playerContentView?.togglePlayback() }
+    func cancelAndWaitForClipExport() async { await playerContentView?.cancelAndWaitForClipExport() }
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .scrollWheel, playerContentView?.handleScrollWheel(event) == true {
             return
@@ -102,10 +120,19 @@ final class PlayerWindow: NSWindow {
 
         if event.type == .keyUp, event.keyCode == 123 || event.keyCode == 124 {
             arrowKeySeekAcceleration.endHold(for: event.keyCode)
+            playerContentView?.finishSeeking()
         }
 
         let modifierKeys = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if event.type == .keyDown, modifierKeys.isEmpty, !isEditingText {
+            if playerContentView?.clipSelection != nil {
+                switch event.keyCode {
+                case 53: playerContentView?.exitClipMode(); return
+                case 34: playerContentView?.markClipStart(nil); return
+                case 31: playerContentView?.markClipEnd(nil); return
+                default: break
+                }
+            }
             switch event.keyCode {
             case 49:
                 playPauseAction()
@@ -117,9 +144,11 @@ final class PlayerWindow: NSWindow {
                 nextAction()
                 return
             case 123:
+                if event.isARepeat { playerContentView?.beginSeeking() }
                 seekBackwardAction(seekMultiplier(for: event))
                 return
             case 124:
+                if event.isARepeat { playerContentView?.beginSeeking() }
                 seekForwardAction(seekMultiplier(for: event))
                 return
             case 51, 117:
@@ -131,6 +160,14 @@ final class PlayerWindow: NSWindow {
         }
 
         super.sendEvent(event)
+    }
+
+    override func resignKey() {
+        playerContentView?.clipRangeSlider.cancelTracking()
+        playerContentView?.finishSeeking()
+        arrowKeySeekAcceleration.endHold(for: 123)
+        arrowKeySeekAcceleration.endHold(for: 124)
+        super.resignKey()
     }
 
     override func keyDown(with event: NSEvent) {

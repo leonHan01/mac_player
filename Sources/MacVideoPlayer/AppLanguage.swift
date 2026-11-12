@@ -73,6 +73,7 @@ enum AppStrings {
     static var noTags: String { value("No tags", "暂无标签") }
     static var name: String { value("Name", "名称") }
     static var size: String { value("Size", "大小") }
+    static var fileSizeUnavailable: String { value("Size unavailable", "无法读取大小") }
     static var sort: String { value("Sort", "排序") }
     static var currentVideo: String { value("Current video", "正在播放") }
 
@@ -103,7 +104,34 @@ enum AppStrings {
     static var sortBySize: String { value("Sort by file size, largest first", "按文件大小排序（从大到小）") }
     static var showPlaylist: String { value("Show playlist", "显示播放列表") }
     static var hidePlaylist: String { value("Hide playlist", "隐藏播放列表") }
-    static var screenshotSaved: String { value("Screenshot saved to Pictures", "截图已保存到“图片”") }
+    static var screenshot: String { value("Screenshot", "截图") }
+    static var screenshotSaved: String { value("Screenshot saved", "截图已保存") }
+    static var screenshotLocation: String { value("Screenshot Location", "截图保存位置") }
+    static var screenshotDefaultLocation: String { value("Default: Downloads folder", "默认：下载文件夹") }
+    static var chooseFolder: String { value("Choose Folder…", "选择文件夹…") }
+    static var trimVideo: String { value("Trim Video", "截取片段") }
+    static var clipStart: String { value("Start", "起点") }
+    static var clipEnd: String { value("End", "终点") }
+    static var clipExportMP4: String { value("Export MP4…", "导出 MP4…") }
+    static var clipInvalidRange: String { value("Enter a valid start and end within the video. The end must be later than the start.", "请输入视频范围内的有效起点和终点，终点必须晚于起点。") }
+    static var clipSourceAsDestination: String { value("Choose a different filename. The source video cannot be replaced.", "请选择其他文件名，不能覆盖原视频。") }
+    static var clipUnsupportedFormat: String { value("This video format could not be exported.", "无法导出此视频格式。") }
+    static var clipEncoderUnavailable: String { value("The app's video export tool is missing. Reinstall the complete Mac Video Player app.", "应用内置的视频导出工具缺失，请重新安装完整的 Mac Video Player 应用。") }
+    static var clipMP4Required: String { value("Choose a filename ending in .mp4.", "请选择以 .mp4 结尾的文件名。") }
+    static var clipExportFailed: String { value("The clip could not be exported. Try a different range or save location.", "无法导出片段，请尝试其他时间范围或保存位置。") }
+    static var clipExporting: String { value("Exporting MP4… This may take a while for longer clips.", "正在导出 MP4… 较长的片段可能需要一些时间。") }
+    static var clipCancelExport: String { value("Cancel Export", "取消导出") }
+    static var clipCancelling: String { value("Cancelling export…", "正在取消导出…") }
+    static var clipCancelled: String { value("Export cancelled.", "已取消导出。") }
+    static var clipExported: String { value("MP4 exported. Choose Reveal in Finder to view the file.", "MP4 已导出，可点击“在 Finder 中显示”查看文件。") }
+    static var clipOpenVideoFirst: String { value("Open a video and wait for its duration before trimming a clip.", "请先打开视频，待视频时长载入后再截取片段。") }
+    static var clipModeHint: String { value("Trim mode: drag the two ends of the timeline to select a clip, or click the track to preview. I sets the start, O sets the end, Esc exits.", "截取模式：拖动进度条两端选择片段，点击轨道预览画面。I 设起点，O 设终点，Esc 退出。") }
+    static var clipTimeline: String { value("Clip timeline: start, end, and preview position", "截取时间轴：起点、终点和预览位置") }
+    static var clipMarkStart: String { value("Set Start", "设为起点") }
+    static var clipMarkEnd: String { value("Set End", "设为终点") }
+    static var clipPreview: String { value("Preview", "预览片段") }
+    static var clipExitMode: String { value("Exit Trim", "退出截取") }
+    static func clipDuration(_ duration: String) -> String { value("Clip: \(duration)", "时长：\(duration)") }
     static var removeTag: String { value("Remove tag", "移除标签") }
 
     static func playlistCount(_ count: Int) -> String {
@@ -159,6 +187,9 @@ enum AppStrings {
     }
     static var moveToTrash: String { value("Move to Trash", "移到废纸篓") }
     static var cannotOpenVideo: String { value("Cannot Open Video", "无法打开视频") }
+    static func playbackFailureNotice(_ filename: String) -> String {
+        value("Cannot play: \(filename)", "无法播放：\(filename)")
+    }
     static func cannotOpenVideoMessage(_ filename: String, error: String) -> String {
         isChinese ? "无法打开 \(filename)。\n\n支持的格式：\(SupportedVideoFormat.displayName)。\n\n\(error)" : "\(filename) could not be opened.\n\nSupported formats are \(SupportedVideoFormat.displayName).\n\n\(error)"
     }

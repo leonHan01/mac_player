@@ -103,7 +103,18 @@ final class TagStore {
         }
 
         let data = try Data(contentsOf: storeURL)
-        tagsByPath = try JSONDecoder().decode([String: [String]].self, from: data).mapValues(normalize)
+        let records = try JSONDecoder().decode([String: [String]].self, from: data)
+        // Many files share the same tags. Normalize those combinations once
+        // during startup, with a bounded cache that is released after loading.
+        var normalizedCombinations: [[String]: [String]] = [:]
+        tagsByPath = records.mapValues { tags in
+            if let cached = normalizedCombinations[tags] { return cached }
+            let normalized = normalize(tags)
+            if normalizedCombinations.count < 256 {
+                normalizedCombinations[tags] = normalized
+            }
+            return normalized
+        }
     }
 
     func waitForPendingWrites() async {

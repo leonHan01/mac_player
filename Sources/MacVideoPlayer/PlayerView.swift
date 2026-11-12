@@ -2,6 +2,23 @@ import AppKit
 import AVKit
 
 @MainActor
+final class PlaybackProgressSlider: NSSlider {
+    private(set) var isTrackingSeek = false
+    var onTrackingStarted: (() -> Void)?
+    var onTrackingEnded: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        isTrackingSeek = true
+        onTrackingStarted?()
+        defer {
+            isTrackingSeek = false
+            onTrackingEnded?()
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+@MainActor
 final class CircularPlaybackButton: NSButton {
     // Native button alignment insets can make a square constraint produce a
     // taller frame. Match the alignment rectangle to the visible circle.
@@ -62,12 +79,14 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let titleSubtitleLabel = NSTextField(labelWithString: "Your local video library")
     internal let titleOpenButton = NSButton(title: "Open", target: nil, action: nil)
     internal let titleFolderButton = NSButton(title: "Folder", target: nil, action: nil)
+    internal let screenshotButton = NSButton(title: "Screenshot", target: nil, action: nil)
+    internal let trimVideoButton = NSButton(title: "Trim Video", target: nil, action: nil)
     internal let playlistToggleButton = NSButton(title: "", target: nil, action: nil)
     internal let playerSurface = NSView()
     internal let playerView = AVPlayerView()
     internal let mpvPlayerView = MPVVideoView()
-    internal let screenshotToast = NSVisualEffectView()
-    internal let screenshotToastLabel = NSTextField(labelWithString: "")
+    internal let notificationToast = NSVisualEffectView()
+    internal let notificationToastLabel = NSTextField(wrappingLabelWithString: "")
     internal let playlistPanel = NSView()
     internal let playlistSeparator = NSBox()
     internal let playlistTitleLabel = NSTextField(labelWithString: "Playlist")
@@ -98,7 +117,30 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let playbackModeButton = NSButton()
     internal let currentTimeLabel = NSTextField(labelWithString: "0:00")
     internal let durationLabel = NSTextField(labelWithString: "0:00")
-    internal let progressSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    internal let progressSlider = PlaybackProgressSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    internal let clipRangeSlider = ClipRangeSlider()
+    internal let clipControls = NSStackView()
+    internal let clipStartLabel = NSTextField(labelWithString: "")
+    internal let clipEndLabel = NSTextField(labelWithString: "")
+    internal let clipStartField = NSTextField()
+    internal let clipEndField = NSTextField()
+    internal let clipDurationLabel = NSTextField(labelWithString: "")
+    internal let clipMarkStartButton = NSButton()
+    internal let clipMarkEndButton = NSButton()
+    internal let clipPreviewButton = NSButton()
+    internal let clipRevealButton = NSButton()
+    internal let clipExitButton = NSButton()
+    internal let clipExportButton = NSButton()
+    internal let clipProgress = NSProgressIndicator()
+    internal let clipExporter = VideoClipExporter()
+    internal var clipSelection: ClipTrimSelection?
+    internal var clipSessionID: UUID?
+    internal var clipExportTask: Task<Void, Never>?
+    internal var clipIsCancelling = false
+    internal var clipIsChoosingDestination = false
+    internal var clipSavedURL: URL?
+    internal var isPreviewingClip = false
+    internal lazy var tagBarHeightConstraint = tagBar.heightAnchor.constraint(equalToConstant: 48)
     internal let volumeButton = NSButton()
     internal let volumeSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
     internal let emptyState = NSTextField(labelWithString: "Drop a video here, or choose a file or folder to begin.")
@@ -112,12 +154,16 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let previousAction: () -> Void
     internal let nextAction: () -> Void
     internal let sortAction: () -> Void
+    internal let screenshotAction: () -> Void
+    internal let trimVideoAction: () -> Void
+    internal var screenshotShortcut = ScreenshotShortcut.default
     internal var timeObserverToken: Any?
     internal var isSeeking = false
     internal var isSyncingPlaylistSelection = false
     internal var renderedPlaylistRevision: UInt64?
     internal var renderedPlaylistSelection: Int?
     internal var renderedPlaybackState: Bool?
+    internal var renderedVolumeSymbol: String?
     internal var renderedCanvasHasItem: Bool?
     internal var renderedCurrentTags: [String]?
     internal var renderedTagSuggestions: [String]?
@@ -129,7 +175,8 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal var isUpdatingTags = false
     internal var accumulatedScrollDeltaY: CGFloat = 0
     internal var lastWheelNavigationTime: TimeInterval = 0
-    internal var screenshotToastDismissWorkItem: DispatchWorkItem?
+    internal var notificationDismissWorkItem: DispatchWorkItem?
+    internal var notificationID: UUID?
     internal var libraryLayoutConstraints: [NSLayoutConstraint] = []
     internal var collapsedLibraryLayoutConstraints: [NSLayoutConstraint] = []
     internal var emptyLayoutConstraints: [NSLayoutConstraint] = []
@@ -149,7 +196,9 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         openFolderAction: @escaping () -> Void,
         previousAction: @escaping () -> Void,
         nextAction: @escaping () -> Void,
-        sortAction: @escaping () -> Void
+        sortAction: @escaping () -> Void,
+        screenshotAction: @escaping () -> Void,
+        trimVideoAction: @escaping () -> Void
     ) {
         self.playerController = playerController
         self.tagStore = tagStore
@@ -159,6 +208,8 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         self.previousAction = previousAction
         self.nextAction = nextAction
         self.sortAction = sortAction
+        self.screenshotAction = screenshotAction
+        self.trimVideoAction = trimVideoAction
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -191,6 +242,13 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         titleFolderButton.target = self
         titleFolderButton.action = #selector(openFolderButtonPressed(_:))
 
+        styleTitleButton(screenshotButton, symbolName: "camera")
+        screenshotButton.target = self
+        screenshotButton.action = #selector(screenshotButtonPressed(_:))
+        styleTitleButton(trimVideoButton, symbolName: "scissors")
+        trimVideoButton.target = self
+        trimVideoButton.action = #selector(trimVideoButtonPressed(_:))
+
         styleTitleButton(playlistToggleButton, symbolName: "sidebar.right")
         playlistToggleButton.setButtonType(.pushOnPushOff)
         playlistToggleButton.imagePosition = .imageOnly
@@ -215,20 +273,23 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         mpvPlayerView.translatesAutoresizingMaskIntoConstraints = false
         mpvPlayerView.isHidden = true
 
-        screenshotToast.material = .hudWindow
-        screenshotToast.blendingMode = .withinWindow
-        screenshotToast.state = .active
-        screenshotToast.wantsLayer = true
-        screenshotToast.layer?.cornerRadius = 10
-        screenshotToast.layer?.masksToBounds = true
-        screenshotToast.translatesAutoresizingMaskIntoConstraints = false
-        screenshotToast.isHidden = true
+        notificationToast.material = .hudWindow
+        notificationToast.blendingMode = .withinWindow
+        notificationToast.state = .active
+        notificationToast.wantsLayer = true
+        notificationToast.layer?.cornerRadius = 10
+        notificationToast.layer?.masksToBounds = true
+        notificationToast.translatesAutoresizingMaskIntoConstraints = false
+        notificationToast.isHidden = true
 
-        screenshotToastLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        screenshotToastLabel.textColor = .white
-        screenshotToastLabel.alignment = .center
-        screenshotToastLabel.translatesAutoresizingMaskIntoConstraints = false
-        screenshotToast.addSubview(screenshotToastLabel)
+        notificationToastLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        notificationToastLabel.textColor = .white
+        notificationToastLabel.alignment = .center
+        notificationToastLabel.preferredMaxLayoutWidth = 480
+        notificationToastLabel.maximumNumberOfLines = 2
+        notificationToastLabel.lineBreakMode = .byTruncatingMiddle
+        notificationToastLabel.translatesAutoresizingMaskIntoConstraints = false
+        notificationToast.addSubview(notificationToastLabel)
         playlistPanel.wantsLayer = true
         playlistPanel.layer?.backgroundColor = AppTheme.panelBackground.cgColor
         playlistPanel.layer?.borderWidth = 1
@@ -417,6 +478,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         timelineContainer.translatesAutoresizingMaskIntoConstraints = false
         timelineContainer.addArrangedSubview(currentTimeLabel)
         timelineContainer.addArrangedSubview(progressSlider)
+        timelineContainer.addArrangedSubview(clipRangeSlider)
         timelineContainer.addArrangedSubview(durationLabel)
 
         currentTimeLabel.textColor = AppTheme.secondaryText
@@ -429,10 +491,13 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         progressSlider.target = self
         progressSlider.action = #selector(progressSliderChanged(_:))
         progressSlider.isContinuous = true
+        progressSlider.onTrackingStarted = { [weak self] in self?.beginSeeking() }
+        progressSlider.onTrackingEnded = { [weak self] in self?.finishSeeking() }
         progressSlider.controlSize = .small
         progressSlider.trackFillColor = AppTheme.primaryBlue
         progressSlider.setAccessibilityLabel(AppStrings.playbackPosition)
         progressSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        configureClipControls()
 
         configureIconButton(volumeButton, symbolName: "speaker.wave.2.fill", tooltip: AppStrings.mute)
         volumeButton.action = #selector(volumeButtonPressed(_:))
@@ -481,19 +546,23 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         titlebar.addSubview(titleIconView)
         titlebar.addSubview(titleLabel)
         titlebar.addSubview(titleSubtitleLabel)
+        titlebar.addSubview(screenshotButton)
+        titlebar.addSubview(trimVideoButton)
         titlebar.addSubview(titleFolderButton)
         titlebar.addSubview(titleOpenButton)
         titlebar.addSubview(playlistToggleButton)
 
         playerSurface.addSubview(playerView)
         playerSurface.addSubview(mpvPlayerView)
-        playerSurface.addSubview(screenshotToast)
         addSubview(titlebar)
         addSubview(playerSurface)
         addSubview(playlistPanel)
         addSubview(tagBar)
         addSubview(controlBar)
         addSubview(emptyContainer)
+        // Above the empty-state controls as well as the video, so decode failures
+        // remain visible after the player returns to its empty canvas.
+        addSubview(notificationToast)
 
         configureLayout()
 
@@ -510,8 +579,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
             self?.updateProgress()
         }
         playerController.onPlaybackStateChanged = { [weak self] in
-            self?.updateEmptyState()
-            self?.updateProgress()
+            self?.updatePlaybackState()
         }
         playerController.onPlaybackModeChanged = { [weak self] in
             self?.updatePlaybackModeButton()

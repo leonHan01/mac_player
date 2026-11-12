@@ -23,25 +23,33 @@ final class PlayerController {
     private var activeLoadID: UUID?
     private var scanTask: Task<PlaylistLoadResult, Error>?
     private var removedPathsDuringScan = Set<String>()
+    private var startedFileDuringScan = false
     private let scan: @Sendable (URL, SortMode) throws -> PlaylistLoadResult
+    private let prepareFile: (@Sendable (URL, SortMode) throws -> PlaylistLoadResult?)?
     private let trash: @Sendable (URL) throws -> Void
     private weak var mpvVideoView: MPVVideoView?
     private let mpvPlayback = MPVPlayback()
 
     private(set) var isLoading = false
     private(set) var loadingMessage = AppStrings.loadingVideos
+    var isLoadingPlayback: Bool { isLoading && !startedFileDuringScan }
 
     convenience init() {
-        self.init(scan: { try VideoFileScanner.buildLoadResult(for: $0, sortMode: $1) })
+        self.init(
+            scan: { try VideoFileScanner.buildLoadResult(for: $0, sortMode: $1) },
+            prepareFile: { try VideoFileScanner.prepareExplicitFile(for: $0, sortMode: $1) }
+        )
     }
 
     init(
         scan: @escaping @Sendable (URL, SortMode) throws -> PlaylistLoadResult,
+        prepareFile: (@Sendable (URL, SortMode) throws -> PlaylistLoadResult?)? = nil,
         trash: @escaping @Sendable (URL) throws -> Void = {
             try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
         }
     ) {
         self.scan = scan
+        self.prepareFile = prepareFile
         self.trash = trash
         mpvPlayback.onStateChanged = { [weak self] in
             self?.handleMPVPlaybackUpdate(.state)
@@ -78,8 +86,10 @@ final class PlayerController {
     var sortMode: SortMode { playlistState.sortMode }
     var activeTagFilter: String? { playlistState.activeTagFilter }
 
+    func playlistFileSize(for url: URL) -> Int64? { playlistState.fileSize(for: url) }
+
     var windowTitle: String {
-        if isLoading {
+        if isLoadingPlayback {
             return AppStrings.loadingWindowTitle
         }
 
@@ -139,6 +149,7 @@ final class PlayerController {
     func load(url: URL) {
         scanTask?.cancel()
         removedPathsDuringScan.removeAll()
+        startedFileDuringScan = false
         player.pause()
         mpvPlayback.pause()
 
@@ -150,7 +161,12 @@ final class PlayerController {
 
         let currentSortMode = sortMode
         let scan = self.scan
-        let task = Task.detached(priority: .userInitiated) {
+        let prepareFile = self.prepareFile
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            try Task.checkCancellation()
+            if let initial = try prepareFile?(url, currentSortMode) {
+                try await self?.startPreparedFile(initial, loadID: loadID)
+            }
             try Task.checkCancellation()
             return try scan(url, currentSortMode)
         }
@@ -165,15 +181,38 @@ final class PlayerController {
         }
     }
 
+    private func startPreparedFile(_ result: PlaylistLoadResult, loadID: UUID) throws {
+        guard activeLoadID == loadID else { return }
+        let selectedURL = try playlistState.load(result, excluding: removedPathsDuringScan)
+        startedFileDuringScan = true
+        play(url: selectedURL)
+        onLoadingChanged?()
+    }
+
     private func finishLoad(_ result: PlaylistLoadResult, loadID: UUID) {
         guard activeLoadID == loadID else { return }
 
         let removedPaths = removedPathsDuringScan
+        let expandedSelection = startedFileDuringScan ? currentVideoURL : nil
+        // The file may already be playing or paused. Expanding its sibling list
+        // must retain that selection and must never reload the decoder.
+        let result = startedFileDuringScan ? PlaylistLoadResult(
+            requestedURL: result.requestedURL,
+            startURL: expandedSelection ?? result.startURL,
+            startsAtFirstVideo: expandedSelection == nil,
+            fileSizes: result.fileSizes,
+            playlistsBySortMode: result.playlistsBySortMode,
+            sortMode: result.sortMode
+        ) : result
         resetLoadingState()
 
         do {
             let selectedURL = try playlistState.load(result, excluding: removedPaths)
-            play(url: selectedURL)
+            if let expandedSelection, VideoFileScanner.isSameFile(selectedURL, expandedSelection) {
+                onItemChanged?()
+            } else {
+                play(url: selectedURL)
+            }
         } catch {
             onLoadFailed?(result.requestedURL, error)
         }
@@ -194,6 +233,7 @@ final class PlayerController {
         activeLoadID = nil
         scanTask = nil
         isLoading = false
+        startedFileDuringScan = false
         loadingMessage = AppStrings.loadingVideos
     }
 
@@ -286,6 +326,14 @@ final class PlayerController {
         player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
+    func beginSeeking() {
+        mpvPlayback.beginSeeking()
+    }
+
+    func finishSeeking() {
+        mpvPlayback.finishSeeking()
+    }
+
     func togglePlayPause() {
         if mpvPlayback.isActive {
             if mpvPlayback.isPlaying {
@@ -309,6 +357,16 @@ final class PlayerController {
         }
 
         onItemChanged?()
+    }
+
+    func pausePlayback() {
+        player.pause()
+        if mpvPlayback.isActive { mpvPlayback.pause() }
+        onPlaybackStateChanged?()
+    }
+
+    func setClipModeEnabled(_ enabled: Bool) {
+        mpvPlayback.setKeepOpen(enabled)
     }
 
     func setPlaybackVolume(_ volume: Double) {
@@ -368,9 +426,6 @@ final class PlayerController {
             return
         }
 
-        mpvPlayback.setVolume(Double(player.volume))
-        mpvPlayback.setMuted(player.isMuted)
-
         do {
             try mpvPlayback.start(url: url, in: mpvVideoView)
             onRendererChanged?(true)
@@ -398,6 +453,7 @@ final class PlayerController {
         activeLoadID = nil
         removedPathsDuringScan.removeAll()
         isLoading = false
+        startedFileDuringScan = false
         stopNativePlayback()
         mpvPlayback.shutdown()
         onRendererChanged?(false)

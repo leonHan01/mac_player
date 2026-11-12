@@ -17,6 +17,20 @@ private struct VideoFileScan {
 }
 
 enum VideoFileScanner {
+    /// Validate a selected file without enumerating or sorting its siblings.
+    /// Folder opens still need the complete scan to choose their first video.
+    static func prepareExplicitFile(for url: URL, sortMode: SortMode) throws -> PlaylistLoadResult? {
+        try Task.checkCancellation()
+        guard try !isDirectory(url) else { return nil }
+        try validateFile(url: url)
+        return PlaylistLoadResult(
+            requestedURL: url, startURL: url, startsAtFirstVideo: false,
+            fileSizes: [url: fileSize(url)],
+            playlistsBySortMode: [.nameAscending: [url], .sizeDescending: [url]],
+            sortMode: sortMode
+        )
+    }
+
     static func buildLoadResult(
         for url: URL,
         sortMode: SortMode,

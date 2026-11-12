@@ -21,7 +21,7 @@ def main():
             "-module-cache-path", str(args.module_cache or scratch / "module-cache"),
             "-target", f"{platform.machine()}-apple-macosx13.0",
             *(str(source / name) for name in [
-                "AppLanguage.swift", "Models.swift", "VideoFileScanner.swift", "TagStore.swift"
+                "AppLanguage.swift", "Models.swift", "VideoFileScanner.swift", "TagStore.swift", "PlaylistState.swift"
             ]),
             str(root / "Tests/PerformanceBenchmarks/main.swift"), "-o", str(binary)
         ], check=True, timeout=300)

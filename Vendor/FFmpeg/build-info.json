@@ -1,0 +1,65 @@
+{
+  "architectures": [
+    "arm64"
+  ],
+  "deploymentTarget": "13.0",
+  "sources": {
+    "ffmpeg": {
+      "version": "9.0.2",
+      "archive": "ffmpeg-9.0.2.tgz",
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n9.0.2",
+      "sha256": "6e374ed621e48faa40639307dff48ba6fe574a509977956d2cce9669b7cc27e9"
+    },
+    "x264": {
+      "version": "31e19f92f00c7003fa115047ce50978bc98c3a0d",
+      "archive": "x264-31e19f92.tar.bz2",
+      "url": "https://code.videolan.org/videolan/x264/-/archive/31e19f92f00c7003fa115047ce50978bc98c3a0d/x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.bz2",
+      "sha256": "01a4acb74eea1118c3aa96c3e18ee3384bc1f2bc670f31fb0f63be853e4d9d08"
+    },
+    "pkgconf": {
+      "version": "2.3.0",
+      "archive": "pkgconf-2.3.0.tar.xz",
+      "url": "https://distfiles.ariadne.space/pkgconf/pkgconf-2.3.0.tar.xz",
+      "sha256": "3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
+    }
+  },
+  "ffmpegConfigure": [
+    "--prefix=/usr/local",
+    "--extra-version=MacVideoPlayer",
+    "--cc=/usr/bin/clang",
+    "--pkg-config=/Users/leon/Documents/project/myplayer/.build/ffmpeg-runtime-arm64/prefix/bin/pkgconf",
+    "--pkg-config-flags=--static --keep-system-cflags --keep-system-libs",
+    "--disable-autodetect",
+    "--disable-debug",
+    "--disable-doc",
+    "--disable-network",
+    "--disable-shared",
+    "--enable-static",
+    "--disable-ffplay",
+    "--disable-ffprobe",
+    "--disable-indevs",
+    "--disable-outdevs",
+    "--enable-gpl",
+    "--enable-libx264",
+    "--enable-zlib",
+    "--enable-bzlib",
+    "--enable-iconv",
+    "--extra-libs=-liconv"
+  ],
+  "x264Configure": [
+    "--prefix=/Users/leon/Documents/project/myplayer/.build/ffmpeg-runtime-arm64/prefix",
+    "--enable-static",
+    "--enable-pic",
+    "--disable-cli",
+    "--disable-opencl",
+    "--disable-swscale",
+    "--disable-lavf",
+    "--disable-ffms",
+    "--disable-gpac",
+    "--disable-lsmash",
+    "--disable-avs",
+    "--bit-depth=8",
+    "--chroma-format=420"
+  ],
+  "binarySHA256": "48db914ba6d00f5ed8b45489fba2767b6656f92fb84370494dc53a8a26e482ed"
+}
