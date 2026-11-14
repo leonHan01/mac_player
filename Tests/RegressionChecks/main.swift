@@ -58,6 +58,9 @@ struct RegressionChecks {
         let libraryURL = URL(fileURLWithPath: CommandLine.arguments[1])
         let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        checkTagMatchCache(root)
+        checkProgressAndSearch(root)
+        try await checkPlaybackSpeed(libraryURL, root)
         checkSeekCommandRate()
         try await checkSeekProgress(libraryURL, root)
         try await checkInteractiveSeeks(libraryURL, root)
@@ -86,6 +89,30 @@ struct RegressionChecks {
         checkCommandQueue()
         try await checkPlaybackEvents(libraryURL, root)
         print("PASS: tag protection, tag filtering, sort races, command ordering, EOF/replay, late events, screenshots")
+    }
+
+    static func checkPlaybackSpeed(_ libraryURL: URL, _ root: URL) async throws {
+        expect(PlaybackSpeed.stepped(from: 0.5, by: -1) == 0.5
+               && PlaybackSpeed.stepped(from: 2, by: 1) == 2
+               && PlaybackSpeed.stepped(from: 1, by: 1) == 1.5,
+               "Speed steps must follow the supported rates and stop at their bounds")
+        let fake = FakeMPV(url: libraryURL)
+        let engine = MPVPlayback(libraryURL: libraryURL)
+        defer { engine.shutdown() }
+        engine.setSpeed(1.5)
+        try engine.loadMedia(url: root.appendingPathComponent("speed.mp4"))
+        expect(String(cString: fake.initialOption("speed")) == "1.5", "Speed must apply before initialization")
+        fake.start(1)
+        await fake.finishCommands()
+        engine.setSpeed(2)
+        expect(String(cString: fake.argument(0)) == "set" && String(cString: fake.argument(1)) == "speed"
+               && String(cString: fake.argument(2)) == "2.0", "Speed changes must reach mpv")
+        await fake.finishCommands()
+        try engine.loadMedia(url: root.appendingPathComponent("speed-next.mp4"))
+        fake.start(2)
+        await fake.finishCommands()
+        expect(String(cString: fake.argument(1)) == "pause", "Switching files must retain speed without resetting it")
+        print("PASS: playback speed steps, initialization, changes, and file switches")
     }
 
     static func checkSeekProgress(_ libraryURL: URL, _ root: URL) async throws {

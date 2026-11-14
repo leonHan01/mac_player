@@ -2,11 +2,10 @@ import AppKit
 import UniformTypeIdentifiers
 
 extension PlayerView {
-    internal var isExportingClip: Bool { clipExportTask != nil }
+    internal var isExportingClip: Bool { clipTasks.hasActiveTasks }
 
     internal func toggleClipMode() {
         if clipSelection != nil { exitClipMode(); return }
-        guard !isExportingClip else { showNotification(AppStrings.clipCancelling); return }
         guard let source = playerController.currentVideoURL, playerController.hasActivePlayback,
               let selection = try? ClipTrimSelection(source: source, duration: playerController.playbackDuration) else {
             showNotification(AppStrings.clipOpenVideoFirst)
@@ -14,7 +13,6 @@ extension PlayerView {
         }
         clipSelection = selection
         clipSessionID = UUID()
-        clipSavedURL = nil
         isPreviewingClip = false
         playerController.setClipModeEnabled(true)
         playerController.pausePlayback()
@@ -31,7 +29,6 @@ extension PlayerView {
         window?.makeFirstResponder(nil)
         isPreviewingClip = false
         clipIsChoosingDestination = false
-        if isExportingClip { clipIsCancelling = true; clipExporter.cancel() }
         if playerController.currentVideoURL == selection.source, playerController.hasActivePlayback {
             playerController.pausePlayback()
             // Leave the last frame seekable before restoring normal EOF behavior.
@@ -52,10 +49,7 @@ extension PlayerView {
     }
 
     internal func cancelAndWaitForClipExport() async {
-        guard isExportingClip else { return }
-        clipIsCancelling = true
-        clipExporter.cancel()
-        await clipExportTask?.value
+        await clipTasks.cancelAndWait()
     }
 
     internal func togglePlayback() {
@@ -97,19 +91,16 @@ extension PlayerView {
         tagBarHeightConstraint.constant = editing ? 80 : 48
         trimVideoButton.state = editing ? .on : .off
         trimVideoButton.layer?.backgroundColor = (editing ? AppTheme.selectedBlue : AppTheme.panelBackground).cgColor
-        let busy = isExportingClip
         for control in [clipRangeSlider, clipStartField, clipEndField, clipMarkStartButton, clipMarkEndButton, clipPreviewButton] as [NSControl] {
-            control.isEnabled = editing && !busy && !clipIsChoosingDestination && !playerController.isLoadingPlayback
+            control.isEnabled = editing && !clipIsChoosingDestination && !playerController.isLoadingPlayback
         }
-        clipRevealButton.isEnabled = clipSavedURL != nil && !busy
-        clipExportButton.isEnabled = editing && !clipIsChoosingDestination && !clipIsCancelling && (busy || !playerController.isLoadingPlayback)
-        let exportTitle = busy ? (clipIsCancelling ? AppStrings.clipCancelling : AppStrings.clipCancelExport) : AppStrings.clipExportMP4
+        clipRevealButton.isEnabled = true
+        clipExportButton.isEnabled = editing && !clipIsChoosingDestination && !playerController.isLoadingPlayback
+        let exportTitle = AppStrings.clipExportMP4
         if clipExportButton.title != exportTitle {
             clipExportButton.title = exportTitle
             setButtonTitleColor(clipExportButton, color: .white)
         }
-        clipProgress.isHidden = !busy
-        if busy { clipProgress.startAnimation(nil) } else { clipProgress.stopAnimation(nil) }
         guard let selection = clipSelection else { clipRangeSlider.selection = nil; return }
         clipRangeSlider.selection = selection
         clipRangeSlider.setAccessibilityValue("\(VideoClipTime.format(selection.start)) – \(VideoClipTime.format(selection.end))")
@@ -146,7 +137,7 @@ extension PlayerView {
     @objc internal func clipTimesChanged(_ sender: Any?) { commitClipTimes() }
 
     @objc internal func markClipStart(_ sender: Any?) {
-        guard clipSelection != nil, !isExportingClip else { return }
+        guard clipSelection != nil else { return }
         window?.makeFirstResponder(clipRangeSlider)
         guard var selection = clipSelection else { return }
         selection.markStart(at: playerController.playbackCurrentTime)
@@ -157,7 +148,7 @@ extension PlayerView {
     }
 
     @objc internal func markClipEnd(_ sender: Any?) {
-        guard clipSelection != nil, !isExportingClip else { return }
+        guard clipSelection != nil else { return }
         window?.makeFirstResponder(clipRangeSlider)
         guard var selection = clipSelection else { return }
         selection.markEnd(at: playerController.playbackCurrentTime)
@@ -169,17 +160,11 @@ extension PlayerView {
 
     @objc internal func previewClip(_ sender: Any?) { togglePlayback() }
     @objc internal func exitClip(_ sender: Any?) { exitClipMode() }
-    @objc internal func revealExportedClip(_ sender: Any?) {
-        if let clipSavedURL { NSWorkspace.shared.activateFileViewerSelecting([clipSavedURL]) }
+    @objc internal func showExportTasks(_ sender: Any?) {
+        showClipTasks()
     }
 
     @objc internal func exportClip(_ sender: Any?) {
-        if isExportingClip {
-            clipIsCancelling = true
-            clipExporter.cancel()
-            refreshClipControls()
-            return
-        }
         guard !clipIsChoosingDestination, commitClipTimes(), let selection = clipSelection,
               let identifier = clipSessionID, let window, let range = try? selection.exportRange() else { return }
         clipIsChoosingDestination = true
@@ -192,30 +177,24 @@ extension PlayerView {
         let start = VideoClipTime.format(range.start).replacingOccurrences(of: ":", with: "-")
         let end = VideoClipTime.format(range.end).replacingOccurrences(of: ":", with: "-")
         panel.nameFieldStringValue = "\(selection.source.deletingPathExtension().lastPathComponent)-\(start)-\(end).mp4"
-        panel.directoryURL = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, self.clipSessionID == identifier else { return }
             self.clipIsChoosingDestination = false
             guard response == .OK, let destination = panel.url else { self.refreshClipControls(); return }
-            self.clipIsCancelling = false
-            self.clipSavedURL = nil
-            self.clipExportTask = Task { [self] in
-                do {
-                    if clipIsCancelling { throw CancellationError() }
-                    try await clipExporter.export(source: selection.source, range: range, destination: destination)
-                    clipSavedURL = destination
-                    showNotification(AppStrings.clipExported, detail: destination.path)
-                } catch is CancellationError {
-                    showNotification(AppStrings.clipCancelled)
-                } catch {
-                    showNotification(AppStrings.clipExportFailed, detail: error.localizedDescription)
-                }
-                clipExportTask = nil
-                clipIsCancelling = false
-                refreshClipControls()
+            guard self.clipTasks.enqueue(source: selection.source, range: range, destination: destination) else {
+                self.showNotification(AppStrings.clipTaskDuplicate)
+                self.refreshClipControls()
+                return
             }
+            self.showClipTasks()
             self.refreshClipControls()
         }
+    }
+
+    internal func showClipTasks() {
+        if clipTasksWindow == nil { clipTasksWindow = ClipTasksWindowController(tasks: clipTasks) }
+        clipTasksWindow?.show()
     }
 
     internal func applyClipLanguage() {
@@ -235,7 +214,7 @@ extension PlayerView {
         clipExitButton.toolTip = "\(AppStrings.clipExitMode) (Esc)"
         clipExportButton.title = AppStrings.clipExportMP4
         stylePrimaryButton(clipExportButton)
-        configureIconButton(clipRevealButton, symbolName: "folder", tooltip: AppStrings.menuRevealInFinder)
+        configureIconButton(clipRevealButton, symbolName: "list.bullet.rectangle", tooltip: AppStrings.clipTasks)
         refreshClipControls()
     }
 
@@ -264,15 +243,10 @@ extension PlayerView {
         info.spacing = 8
         info.alignment = .centerY
         for label in [clipStartLabel, clipEndLabel] { label.font = .systemFont(ofSize: 11); label.setContentHuggingPriority(.required, for: .horizontal) }
-        clipProgress.style = .spinning
-        clipProgress.controlSize = .small
-        clipProgress.isDisplayedWhenStopped = false
-        clipProgress.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        clipProgress.heightAnchor.constraint(equalToConstant: 16).isActive = true
         for (button, action, width) in [(clipMarkStartButton, #selector(markClipStart(_:)), 78.0),
                                          (clipMarkEndButton, #selector(markClipEnd(_:)), 78.0),
                                          (clipPreviewButton, #selector(previewClip(_:)), 88.0),
-                                         (clipRevealButton, #selector(revealExportedClip(_:)), 28.0),
+                                         (clipRevealButton, #selector(showExportTasks(_:)), 28.0),
                                          (clipExitButton, #selector(exitClip(_:)), 78.0),
                                          (clipExportButton, #selector(exportClip(_:)), 116.0)] {
             button.target = self
@@ -280,7 +254,7 @@ extension PlayerView {
             button.widthAnchor.constraint(equalToConstant: width).isActive = true
             button.heightAnchor.constraint(equalToConstant: 28).isActive = true
         }
-        let actions = NSStackView(views: [clipMarkStartButton, clipMarkEndButton, clipPreviewButton, clipRevealButton, NSView(), clipProgress, clipExitButton, clipExportButton])
+        let actions = NSStackView(views: [clipMarkStartButton, clipMarkEndButton, clipPreviewButton, clipRevealButton, NSView(), clipExitButton, clipExportButton])
         actions.spacing = 8
         actions.alignment = .centerY
         for row in [info, actions] { clipControls.addArrangedSubview(row); row.widthAnchor.constraint(equalTo: clipControls.widthAnchor).isActive = true }

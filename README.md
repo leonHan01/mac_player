@@ -13,6 +13,9 @@ Mac Video Player keeps local viewing simple: open a video or folder, browse the 
 ## Highlights
 
 - **Native light appearance** — a calm macOS-style interface with a large video canvas and a circular play/pause button.
+- **Playback speed** — choose 0.5×, 1×, 1.5×, or 2×; use ⌘⌥− / ⌘⌥= to change speed and ⌘⌥0 to reset. The chosen speed carries across videos.
+- **Playback progress** — resume videos from their last position; videos near the end restart from the beginning.
+- **Playlist search** — filter filenames alongside tags. Search affects displayed rows; previous and next follow the tag-filtered playlist.
 - **Local libraries** — open an MP4, MOV, M4V, or MKV file, or scan a folder to build a playlist automatically.
 - **Collapsible playlist** — see each video's format and file size, hide the playlist with the sidebar button to give the video more room, then restore it without losing the current selection.
 - **Tags that stay local** — add, remove, and filter tags from the player or the tag editor. Tags are stored separately as JSON and never modify the media file.
@@ -56,7 +59,7 @@ Open a video and click **Trim Video** or press `⌘⇧E` to enter **trim mode in
 
 The toolbar shows start, end, and clip duration. Enter `HH:MM:SS.mmm`, `MM:SS.mmm`, or seconds for precise adjustments, or seek and choose **Set Start** / **Set End** (`I` / `O`). **Preview** or Space plays from the selected start and pauses at the end. Seeking to the source's last frame stays on that video. Choose **Exit Trim**, press `Esc`, or press `⌘⇧E` again to restore normal controls. Press Return to commit a time edit before using keyboard mode controls.
 
-Choose **Export MP4…** to select the filename and destination; while exporting it becomes **Cancel Export**. After export, the folder button reveals the clip in Finder. Switching videos or exiting trim mode cancels the current export. Every export captures its source and confirmed range, protects the source and existing destinations on failure or cancellation, removes temporary output, and is cancelled before quitting.
+Choose **Export MP4…** to select a filename and destination (Downloads by default). Exports run in a background queue, and the task panel shows progress, cancellation, and completed files in Finder. Reopen it with **File > Export Tasks**. Switching videos or exiting trim mode leaves tasks running with their captured source and range. Failed or cancelled exports preserve existing destinations and remove temporary files. Unfinished tasks are cancelled before quitting.
 
 The app includes standalone FFmpeg with statically linked FFmpeg/x264 libraries. Clips use H.264 video and AAC audio and support sources such as MKV. Copy the complete application to another compatible Mac to export clips without installing FFmpeg or Homebrew. The current application bundle targets Apple Silicon (arm64) and macOS 13.0 or later.
 

@@ -217,6 +217,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         playerController.togglePlaybackMode()
     }
 
+    @objc private func decreasePlaybackSpeed(_ sender: Any?) { playerController.stepPlaybackSpeed(-1) }
+    @objc private func increasePlaybackSpeed(_ sender: Any?) { playerController.stepPlaybackSpeed(1) }
+    @objc private func resetPlaybackSpeed(_ sender: Any?) { playerController.setPlaybackSpeed(1) }
+
+    @objc private func showClipTasks(_ sender: Any?) { window?.showClipTasks() }
+
     @objc private func toggleSortMode(_ sender: Any?) {
         playerController.toggleSortMode(tagStore: tagStore)
     }
@@ -420,6 +426,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(togglePlayPause(_:)),
             keyEquivalent: " "
         ).target = self
+        for (title, action, key) in [
+            (AppStrings.decreaseSpeed, #selector(decreasePlaybackSpeed(_:)), "-"),
+            (AppStrings.increaseSpeed, #selector(increasePlaybackSpeed(_:)), "="),
+            (AppStrings.resetSpeed, #selector(resetPlaybackSpeed(_:)), "0")
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = self
+            item.keyEquivalentModifierMask = [.command, .option]
+            fileMenu.addItem(item)
+        }
         let screenshotMenuItem = NSMenuItem(
             title: AppStrings.menuCaptureScreenshot,
             action: #selector(captureScreenshot(_:)),
@@ -429,6 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(screenshotMenuItem)
         self.screenshotMenuItem = screenshotMenuItem
         refreshScreenshotMenuShortcut()
+        fileMenu.addItem(withTitle: AppStrings.clipTasks, action: #selector(showClipTasks(_:)), keyEquivalent: "").target = self
         let trimItem = fileMenu.addItem(withTitle: AppStrings.trimVideo + "…", action: #selector(trimVideo(_:)), keyEquivalent: "e")
         trimItem.target = self
         trimItem.keyEquivalentModifierMask = [.command, .shift]

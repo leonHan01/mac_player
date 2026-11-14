@@ -69,6 +69,7 @@ private enum MPVEventID {
     static let commandReply: Int32 = 5
     static let startFile: Int32 = 6
     static let endFile: Int32 = 7
+    static let fileLoaded: Int32 = 8
     static let propertyChange: Int32 = 22
 }
 
@@ -160,6 +161,7 @@ final class MPVPlayback: NSObject {
     var onStateChanged: (() -> Void)?
     var onProgressUpdated: (() -> Void)?
     var onEnded: (() -> Void)?
+    var onFileLoaded: ((URL) -> Void)?
     var onFailed: ((URL, Error) -> Void)?
 
     private let libraryURL: URL?
@@ -185,6 +187,7 @@ final class MPVPlayback: NSObject {
     private var nextLoadGeneration: UInt64 = 0
     private var pendingLoad: PendingMPVLoad?
     private var activeLoad: MPVLoadIdentity?
+    private var desiredSpeed = 1.0
     private var desiredVolume = 1.0
     private var desiredMuted = false
 
@@ -345,6 +348,12 @@ final class MPVPlayback: NSObject {
         pendingSeek = nil
         seekRecoveryTimer?.invalidate()
         seekRecoveryTimer = nil
+    }
+
+    func setSpeed(_ speed: Double) {
+        guard speed.isFinite, speed > 0, speed != desiredSpeed else { return }
+        desiredSpeed = speed
+        sendCommand(["set", "speed", String(speed)])
     }
 
     func setVolume(_ volume: Double) {
@@ -531,6 +540,7 @@ final class MPVPlayback: NSObject {
             ("vo", "libmpv"),
             ("gpu-api", "opengl"),
             ("hwdec", "auto-safe"),
+            ("speed", String(desiredSpeed)),
             ("volume", String(desiredVolume * 100)),
             ("mute", desiredMuted ? "yes" : "no"),
             ("keep-open", "no"),
@@ -767,6 +777,10 @@ final class MPVPlayback: NSObject {
             case MPVEventID.startFile:
                 if let startFile = event.data?.assumingMemoryBound(to: MPVStartFileEvent.self).pointee {
                     handleStartFile(startFile)
+                }
+            case MPVEventID.fileLoaded:
+                if let activeLoad, activeLoad.generation == requestedLoad?.generation {
+                    onFileLoaded?(activeLoad.url)
                 }
             case MPVEventID.endFile:
                 if let endFile = event.data?.assumingMemoryBound(to: MPVEndFileEvent.self).pointee {

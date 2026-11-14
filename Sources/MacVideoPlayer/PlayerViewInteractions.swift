@@ -1,6 +1,18 @@
 import AppKit
 
 extension PlayerView {
+    func controlTextDidChange(_ notification: Notification) {
+        if let field = notification.object as? NSSearchField, field === playlistSearch {
+            updatePlaylist()
+        }
+    }
+
+    private func playVisibleRow(_ row: Int) {
+        guard visiblePlaylistURLs.indices.contains(row),
+              let index = playerController.playlistURLs.firstIndex(of: visiblePlaylistURLs[row]) else { return }
+        playerController.play(at: index)
+    }
+
     func controlTextDidEndEditing(_ notification: Notification) {
         if let field = notification.object as? NSTextField, field === clipStartField || field === clipEndField {
             commitClipTimes()
@@ -10,7 +22,7 @@ extension PlayerView {
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        playerController.playlistURLs.count
+        visiblePlaylistURLs.count
     }
 
     func tableView(
@@ -18,15 +30,15 @@ extension PlayerView {
         viewFor tableColumn: NSTableColumn?,
         row: Int
     ) -> NSView? {
-        guard playerController.playlistURLs.indices.contains(row) else { return nil }
+        guard visiblePlaylistURLs.indices.contains(row) else { return nil }
 
         let cell = tableView.makeView(
             withIdentifier: Self.playlistCellIdentifier,
             owner: self
         ) as? PlaylistCellView ?? makePlaylistCell()
 
-        let url = playerController.playlistURLs[row]
-        let isCurrent = playerController.currentPlaylistIndex.map { $0 == row } ?? false
+        let url = visiblePlaylistURLs[row]
+        let isCurrent = playerController.currentVideoURL == url
         cell.configure(url: url, index: row, isCurrent: isCurrent, fileSize: playerController.playlistFileSize(for: url))
         return cell
     }
@@ -39,9 +51,9 @@ extension PlayerView {
         guard !isSyncingPlaylistSelection else { return }
 
         let selectedRow = playlistTableView.selectedRow
-        guard playerController.playlistURLs.indices.contains(selectedRow) else { return }
+        guard visiblePlaylistURLs.indices.contains(selectedRow) else { return }
 
-        playerController.play(at: selectedRow)
+        playVisibleRow(selectedRow)
     }
 
     @objc internal func openButtonPressed(_ sender: NSButton) {
@@ -146,15 +158,21 @@ extension PlayerView {
         }
     }
 
+    @objc internal func speedChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard PlaybackSpeed.values.indices.contains(index) else { return }
+        playerController.setPlaybackSpeed(PlaybackSpeed.values[index])
+    }
+
     @objc internal func sortModeButtonPressed(_ sender: NSButton) {
         sortAction()
     }
 
     @objc internal func playlistRowDoubleClicked(_ sender: NSTableView) {
         let clickedRow = sender.clickedRow
-        guard playerController.playlistURLs.indices.contains(clickedRow) else { return }
+        guard visiblePlaylistURLs.indices.contains(clickedRow) else { return }
 
-        playerController.play(at: clickedRow)
+        playVisibleRow(clickedRow)
     }
 
     @objc internal func progressSliderChanged(_ sender: NSSlider) {

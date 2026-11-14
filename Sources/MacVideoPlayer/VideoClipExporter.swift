@@ -77,12 +77,13 @@ final class VideoClipExporter {
         resolveFFmpeg = { ffmpegURL }
     }
 
-    func export(source: URL, range: VideoClipRange, destination: URL) async throws {
+    func export(source: URL, range: VideoClipRange, destination: URL, onProgress: @escaping @MainActor (Double) -> Void = { _ in }) async throws {
         guard !isExporting else { throw VideoClipError.exportFailed(AppStrings.clipExporting) }
         guard !Self.isSameFile(source, destination) else { throw VideoClipError.sourceAsDestination }
         guard destination.pathExtension.lowercased() == "mp4" else { throw VideoClipError.exportFailed(AppStrings.clipMP4Required) }
         isExporting = true
         isCancelled = false
+        onProgress(0)
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".clip-\(UUID().uuidString).mp4")
         defer {
             try? FileManager.default.removeItem(at: staging)
@@ -92,9 +93,9 @@ final class VideoClipExporter {
         }
 
         if let ffmpegURL = try resolveFFmpeg() {
-            try await exportUsingFFmpeg(ffmpegURL, source: source, range: range, output: staging)
+            try await exportUsingFFmpeg(ffmpegURL, source: source, range: range, output: staging, onProgress: onProgress)
         } else {
-            try await exportUsingAVFoundation(source: source, range: range, output: staging)
+            try await exportUsingAVFoundation(source: source, range: range, output: staging, onProgress: onProgress)
         }
         if isCancelled { throw CancellationError() }
         let size = try staging.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
@@ -104,6 +105,7 @@ final class VideoClipExporter {
         guard rename(staging.path, destination.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+        onProgress(1)
     }
 
     func cancel() {
@@ -119,7 +121,7 @@ final class VideoClipExporter {
     }
 
     static func ffmpegArguments(source: URL, range: VideoClipRange, output: URL) -> [String] {
-        ["-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+        ["-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-progress", "pipe:1", "-stats_period", "0.5",
          "-ss", decimal(range.start), "-i", source.path, "-t", decimal(range.duration),
          "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
          "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-threads", "2",
@@ -158,7 +160,14 @@ final class VideoClipExporter {
         return (searchPaths ?? candidates).first(where: isExecutable)
     }
 
-    private func exportUsingFFmpeg(_ executable: URL, source: URL, range: VideoClipRange, output: URL) async throws {
+    static func progressFraction(line: String, duration: Double) -> Double? {
+        guard line.hasPrefix("out_time_us="), duration.isFinite, duration > 0,
+              let microseconds = Double(line.dropFirst("out_time_us=".count)), microseconds.isFinite else { return nil }
+        return min(max(microseconds / 1_000_000 / duration, 0), 0.99)
+    }
+
+    private func exportUsingFFmpeg(_ executable: URL, source: URL, range: VideoClipRange, output: URL,
+                                   onProgress: @escaping @MainActor (Double) -> Void) async throws {
         let logURL = output.appendingPathExtension("log")
         guard FileManager.default.createFile(atPath: logURL.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
@@ -166,14 +175,42 @@ final class VideoClipExporter {
         defer { try? FileManager.default.removeItem(at: logURL) }
         let log = try FileHandle(forWritingTo: logURL)
         defer { try? log.close() }
+        let progressURL = output.appendingPathExtension("progress")
+        guard FileManager.default.createFile(atPath: progressURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer { try? FileManager.default.removeItem(at: progressURL) }
+        let progressOutput = try FileHandle(forWritingTo: progressURL)
+        let progressInput = try FileHandle(forReadingFrom: progressURL)
+        defer { try? progressOutput.close(); try? progressInput.close() }
         let process = Process()
         process.executableURL = executable
         process.arguments = Self.ffmpegArguments(source: source, range: range, output: output)
         process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
+        process.standardOutput = progressOutput
         process.standardError = log
         process.qualityOfService = .utility
         self.process = process
+        let progressTask = Task { @MainActor in
+            var buffered = ""
+            var lastProgress = 0.0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, !self.isCancelled else { break }
+                guard let data = try? progressInput.readToEnd(), !data.isEmpty,
+                      let text = String(data: data, encoding: .utf8) else { continue }
+                buffered += text
+                let lines = buffered.components(separatedBy: "\n")
+                buffered = lines.last ?? ""
+                for line in lines.dropLast() {
+                    if let value = Self.progressFraction(line: line, duration: range.duration), value > lastProgress {
+                        lastProgress = value
+                        onProgress(value)
+                    }
+                }
+            }
+        }
+        defer { progressTask.cancel() }
         let status: Int32 = try await withCheckedThrowingContinuation { continuation in
             process.terminationHandler = { finished in continuation.resume(returning: finished.terminationStatus) }
             do { try process.run() }
@@ -190,7 +227,8 @@ final class VideoClipExporter {
         }
     }
 
-    private func exportUsingAVFoundation(source: URL, range: VideoClipRange, output: URL) async throws {
+    private func exportUsingAVFoundation(source: URL, range: VideoClipRange, output: URL,
+                                         onProgress: @escaping @MainActor (Double) -> Void) async throws {
         let asset = AVURLAsset(url: source)
         let compatible = await AVAssetExportSession.compatibility(ofExportPreset: AVAssetExportPresetHighestQuality,
                                                                   with: asset, outputFileType: .mp4)
@@ -203,6 +241,19 @@ final class VideoClipExporter {
         session.shouldOptimizeForNetworkUse = true
         session.timeRange = CMTimeRange(start: CMTime(seconds: range.start, preferredTimescale: 60_000),
                                         duration: CMTime(seconds: range.duration, preferredTimescale: 60_000))
+        let progressTask = Task { @MainActor in
+            var lastProgress = 0.0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, !self.isCancelled else { break }
+                let progress = min(max(Double(session.progress), 0), 0.99)
+                if progress.isFinite && progress > lastProgress {
+                    lastProgress = progress
+                    onProgress(progress)
+                }
+            }
+        }
+        defer { progressTask.cancel() }
         await withCheckedContinuation { continuation in
             session.exportAsynchronously { continuation.resume() }
         }

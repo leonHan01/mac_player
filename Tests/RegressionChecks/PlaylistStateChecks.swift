@@ -24,6 +24,53 @@ private struct PlaylistFixture {
 }
 
 extension RegressionChecks {
+    static func checkTagMatchCache(_ root: URL) {
+        let store = TagStore(storeURL: root.appendingPathComponent("cache-test-tags.json"))
+        let url = root.appendingPathComponent("cache-test.mp4")
+        var cache = TagMatchCache()
+        var calls = 0
+        func lookup() -> Bool { calls += 1; return true }
+        cache.prepare(storeID: ObjectIdentifier(store), storeRevision: 0, scopeRevision: 1)
+        expect(cache.matches(url, tag: "Work", lookup: lookup), "Initial match must be found")
+        expect(cache.matches(url, tag: "work", lookup: lookup) && calls == 1,
+               "Equivalent tags must reuse cached matches")
+        cache.prepare(storeID: ObjectIdentifier(store), storeRevision: 1, scopeRevision: 1)
+        _ = cache.matches(url, tag: "work", lookup: lookup)
+        expect(calls == 2, "Committed tag changes must invalidate matches")
+        cache.prepare(storeID: ObjectIdentifier(store), storeRevision: 1, scopeRevision: 2)
+        _ = cache.matches(url, tag: "work", lookup: lookup)
+        expect(calls == 3, "Playlist changes must invalidate matches")
+        _ = cache.matches(url, tag: "other", lookup: lookup)
+        expect(calls == 4, "Changing the tag must invalidate matches")
+        print("PASS: tag match reuse and invalidation")
+    }
+
+    static func checkProgressAndSearch(_ root: URL) {
+        let suite = "MacVideoPlayer-tests-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let url = root.appendingPathComponent("Video 1.mp4")
+        let store = PlaybackProgressStore(defaults: defaults)
+        store.save(url: url, position: 30, duration: 100)
+        expect(PlaybackProgressStore(defaults: defaults).position(for: url) == 30,
+               "Playback positions must survive store recreation")
+        store.save(url: url, position: 96, duration: 100)
+        expect(store.position(for: url) == nil, "Nearly finished videos must restart")
+        store.save(url: url, position: 20, duration: 100)
+        store.save(url: url, position: .nan, duration: 100)
+        expect(store.position(for: url) == 20, "Invalid times must not erase progress")
+        store.remove(url)
+        expect(store.position(for: url) == nil, "Completed or deleted videos must clear progress")
+        let other = root.appendingPathComponent("other.mov")
+        expect(PlaylistState.search([url, other], query: " VIDEO ") == [url],
+               "Search must match filenames case-insensitively")
+        expect(PlaylistState.search([other], query: "video").isEmpty,
+               "Search must apply to the already filtered playlist")
+        expect(PlaylistState.search([url, other], query: "  ") == [url, other],
+               "Clearing search must restore all rows")
+        print("PASS: playback progress persistence, completion, and filename search")
+    }
+
     static func checkPlaylistStateLoading(_ root: URL) throws {
         let fixture = PlaylistFixture(root)
         let files = fixture.urls

@@ -109,9 +109,15 @@ final class PlayerWindow: NSWindow {
 
     var isExportingClip: Bool { playerContentView?.isExportingClip == true }
 
+    func showClipTasks() { playerContentView?.showClipTasks() }
     func toggleClipMode() { playerContentView?.toggleClipMode() }
     func togglePlayPause() { playerContentView?.togglePlayback() }
     func cancelAndWaitForClipExport() async { await playerContentView?.cancelAndWaitForClipExport() }
+
+    override func close() {
+        playerContentView?.clipTasksWindow?.window?.close()
+        super.close()
+    }
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .scrollWheel, playerContentView?.handleScrollWheel(event) == true {

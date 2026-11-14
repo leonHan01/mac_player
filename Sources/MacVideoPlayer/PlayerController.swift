@@ -14,12 +14,15 @@ final class PlayerController {
     var onPlaybackProgressed: (() -> Void)?
     var onPlaybackModeChanged: (() -> Void)?
     var onSortModeChanged: (() -> Void)?
+    var onPlaybackSpeedChanged: (() -> Void)?
     var onLoadingChanged: (() -> Void)?
     var onLoadFailed: ((URL, Error) -> Void)?
     var onRendererChanged: ((Bool) -> Void)?
     var onScreenshotSaved: ((URL) -> Void)?
 
     private var playlistState = PlaylistState()
+    private var tagMatchCache = TagMatchCache()
+    private(set) var playbackSpeed = 1.0
     private var activeLoadID: UUID?
     private var scanTask: Task<PlaylistLoadResult, Error>?
     private var removedPathsDuringScan = Set<String>()
@@ -29,6 +32,10 @@ final class PlayerController {
     private let trash: @Sendable (URL) throws -> Void
     private weak var mpvVideoView: MPVVideoView?
     private let mpvPlayback = MPVPlayback()
+    private let progressStore: PlaybackProgressStore
+    private var playingURL: URL?
+    private var progressReady = false
+    private var lastProgressSave = Date.distantPast
 
     private(set) var isLoading = false
     private(set) var loadingMessage = AppStrings.loadingVideos
@@ -44,10 +51,12 @@ final class PlayerController {
     init(
         scan: @escaping @Sendable (URL, SortMode) throws -> PlaylistLoadResult,
         prepareFile: (@Sendable (URL, SortMode) throws -> PlaylistLoadResult?)? = nil,
+        progressStore: PlaybackProgressStore = PlaybackProgressStore(),
         trash: @escaping @Sendable (URL) throws -> Void = {
             try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
         }
     ) {
+        self.progressStore = progressStore
         self.scan = scan
         self.prepareFile = prepareFile
         self.trash = trash
@@ -57,8 +66,20 @@ final class PlayerController {
         mpvPlayback.onProgressUpdated = { [weak self] in
             self?.handleMPVPlaybackUpdate(.progress)
         }
+        mpvPlayback.onFileLoaded = { [weak self] url in
+            guard let self, let playingURL = self.playingURL,
+                  VideoFileScanner.isSameFile(url, playingURL) else { return }
+            self.progressReady = true
+            if let position = self.progressStore.position(for: url) {
+                self.mpvPlayback.seek(to: position)
+            }
+        }
         mpvPlayback.onEnded = { [weak self] in
-            self?.playNext()
+            guard let self else { return }
+            if let url = self.playingURL { self.progressStore.remove(url) }
+            self.playingURL = nil
+            self.progressReady = false
+            self.playNext()
         }
         mpvPlayback.onFailed = { [weak self] url, error in
             guard let self,
@@ -285,8 +306,12 @@ final class PlayerController {
     }
 
     private func tagMatcher(in tagStore: TagStore) -> (URL, String) -> Bool {
-        { url, tag in
-            tagStore.tags(for: url).contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+        tagMatchCache.prepare(storeID: ObjectIdentifier(tagStore), storeRevision: tagStore.revision,
+                              scopeRevision: playlistState.scopeRevision)
+        return { [self] url, tag in
+            tagMatchCache.matches(url, tag: tag) {
+                tagStore.tags(for: url).contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+            }
         }
     }
 
@@ -369,6 +394,17 @@ final class PlayerController {
         mpvPlayback.setKeepOpen(enabled)
     }
 
+    func setPlaybackSpeed(_ speed: Double) {
+        guard PlaybackSpeed.values.contains(speed), speed != playbackSpeed else { return }
+        playbackSpeed = speed
+        mpvPlayback.setSpeed(speed)
+        onPlaybackSpeedChanged?()
+    }
+
+    func stepPlaybackSpeed(_ direction: Int) {
+        setPlaybackSpeed(PlaybackSpeed.stepped(from: playbackSpeed, by: direction))
+    }
+
     func setPlaybackVolume(_ volume: Double) {
         let clampedVolume = min(max(volume, 0), 1)
         player.volume = Float(clampedVolume)
@@ -399,6 +435,7 @@ final class PlayerController {
 
         // The user may have selected another item or opened another folder
         // while I/O ran. Remove the captured URL, never the new selection.
+        progressStore.remove(url)
         removeVideoFromPlaylist(at: url)
     }
 
@@ -406,6 +443,7 @@ final class PlayerController {
         guard let selectedURL = currentVideoURL,
               VideoFileScanner.isSameFile(selectedURL, url) else { return }
 
+        savePlaybackProgress()
         stopNativePlayback()
         stopMPVPlayback()
     }
@@ -420,6 +458,9 @@ final class PlayerController {
     }
 
     private func play(url: URL) {
+        savePlaybackProgress()
+        playingURL = nil
+        progressReady = false
         stopNativePlayback()
         guard let mpvVideoView else {
             onLoadFailed?(url, MPVPlaybackError.runtimeMissing)
@@ -427,10 +468,12 @@ final class PlayerController {
         }
 
         do {
+            playingURL = url
             try mpvPlayback.start(url: url, in: mpvVideoView)
             onRendererChanged?(true)
             onItemChanged?()
         } catch {
+            playingURL = nil
             onRendererChanged?(false)
             onItemChanged?()
             onLoadFailed?(url, error)
@@ -447,7 +490,16 @@ final class PlayerController {
         onRendererChanged?(false)
     }
 
+    private func savePlaybackProgress() {
+        guard progressReady, let url = playingURL, mpvPlayback.isActive else { return }
+        progressStore.save(url: url, position: mpvPlayback.currentTime, duration: mpvPlayback.duration)
+        lastProgressSave = Date()
+    }
+
     func shutdown() {
+        savePlaybackProgress()
+        progressReady = false
+        playingURL = nil
         scanTask?.cancel()
         scanTask = nil
         activeLoadID = nil
@@ -464,6 +516,7 @@ final class PlayerController {
         case .state:
             onPlaybackStateChanged?()
         case .progress:
+            if Date().timeIntervalSince(lastProgressSave) >= 5 { savePlaybackProgress() }
             onPlaybackProgressed?()
         }
     }

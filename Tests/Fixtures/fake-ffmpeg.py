@@ -11,6 +11,8 @@ output = Path(args[-1])
 source.with_suffix('.started').touch()
 if source.stem == 'slow':
     output.write_bytes(b'partial clip')
+    print('out_time_us=1250000', flush=True)
+    print('progress=continue', flush=True)
     time.sleep(30)
 if source.stem == 'fail':
     output.write_bytes(b'partial clip')

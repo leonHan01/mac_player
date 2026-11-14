@@ -72,7 +72,7 @@ internal final class TagChipButton: NSButton {
 }
 
 @MainActor
-final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSComboBoxDelegate {
+final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSComboBoxDelegate, NSSearchFieldDelegate {
     internal let titlebar = NSView()
     internal let titleIconView = NSImageView()
     internal let titleLabel = NSTextField(labelWithString: "Mac Video Player")
@@ -89,6 +89,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let notificationToastLabel = NSTextField(wrappingLabelWithString: "")
     internal let playlistPanel = NSView()
     internal let playlistSeparator = NSBox()
+    internal let playlistSearch = NSSearchField()
     internal let playlistTitleLabel = NSTextField(labelWithString: "Playlist")
     internal let playlistCountLabel = NSTextField(labelWithString: "0 videos")
     internal let playlistScrollView = NSScrollView()
@@ -109,12 +110,14 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let sortModeButton = NSButton(title: "Sort: Name", target: nil, action: nil)
     internal let controlBar = NSView()
     internal let timelineContainer = NSStackView()
+    internal let timelineTrack = NSView()
     internal let navigationContainer = NSStackView()
     internal let volumeContainer = NSStackView()
     internal let previousButton = NSButton()
     internal let playPauseButton = CircularPlaybackButton()
     internal let nextButton = NSButton()
     internal let playbackModeButton = NSButton()
+    internal let speedPopup = NSPopUpButton()
     internal let currentTimeLabel = NSTextField(labelWithString: "0:00")
     internal let durationLabel = NSTextField(labelWithString: "0:00")
     internal let progressSlider = PlaybackProgressSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
@@ -131,14 +134,11 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal let clipRevealButton = NSButton()
     internal let clipExitButton = NSButton()
     internal let clipExportButton = NSButton()
-    internal let clipProgress = NSProgressIndicator()
-    internal let clipExporter = VideoClipExporter()
+    internal let clipTasks = ClipExportTasks()
+    internal var clipTasksWindow: ClipTasksWindowController?
     internal var clipSelection: ClipTrimSelection?
     internal var clipSessionID: UUID?
-    internal var clipExportTask: Task<Void, Never>?
-    internal var clipIsCancelling = false
     internal var clipIsChoosingDestination = false
-    internal var clipSavedURL: URL?
     internal var isPreviewingClip = false
     internal lazy var tagBarHeightConstraint = tagBar.heightAnchor.constraint(equalToConstant: 48)
     internal let volumeButton = NSButton()
@@ -161,6 +161,8 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
     internal var isSeeking = false
     internal var isSyncingPlaylistSelection = false
     internal var renderedPlaylistRevision: UInt64?
+    internal var visiblePlaylistURLs: [URL] = []
+    internal var renderedSearch = ""
     internal var renderedPlaylistSelection: Int?
     internal var renderedPlaybackState: Bool?
     internal var renderedVolumeSymbol: String?
@@ -337,6 +339,9 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         playlistScrollView.documentView = playlistTableView
         playlistScrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        playlistSearch.translatesAutoresizingMaskIntoConstraints = false
+        playlistSearch.delegate = self
+        playlistPanel.addSubview(playlistSearch)
         playlistPanel.addSubview(playlistSeparator)
         playlistPanel.addSubview(playlistTitleLabel)
         playlistPanel.addSubview(playlistCountLabel)
@@ -477,8 +482,20 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         timelineContainer.spacing = 12
         timelineContainer.translatesAutoresizingMaskIntoConstraints = false
         timelineContainer.addArrangedSubview(currentTimeLabel)
-        timelineContainer.addArrangedSubview(progressSlider)
-        timelineContainer.addArrangedSubview(clipRangeSlider)
+        timelineTrack.translatesAutoresizingMaskIntoConstraints = false
+        timelineTrack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        timelineTrack.addSubview(progressSlider)
+        timelineTrack.addSubview(clipRangeSlider)
+        for slider in [progressSlider, clipRangeSlider] as [NSView] {
+            slider.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                slider.leadingAnchor.constraint(equalTo: timelineTrack.leadingAnchor),
+                slider.trailingAnchor.constraint(equalTo: timelineTrack.trailingAnchor),
+                slider.centerYAnchor.constraint(equalTo: timelineTrack.centerYAnchor),
+                slider.heightAnchor.constraint(equalTo: timelineTrack.heightAnchor)
+            ])
+        }
+        timelineContainer.addArrangedSubview(timelineTrack)
         timelineContainer.addArrangedSubview(durationLabel)
 
         currentTimeLabel.textColor = AppTheme.secondaryText
@@ -525,6 +542,13 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         controlBar.addSubview(navigationContainer)
         controlBar.addSubview(volumeContainer)
         controlBar.addSubview(playbackModeButton)
+        speedPopup.addItems(withTitles: PlaybackSpeed.values.map(PlaybackSpeed.label))
+        speedPopup.selectItem(at: 1)
+        speedPopup.target = self
+        speedPopup.action = #selector(speedChanged(_:))
+        speedPopup.controlSize = .small
+        speedPopup.translatesAutoresizingMaskIntoConstraints = false
+        controlBar.addSubview(speedPopup)
         playbackModeButton.translatesAutoresizingMaskIntoConstraints = false
 
         emptyContainer.orientation = .vertical
@@ -567,6 +591,7 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         configureLayout()
 
         registerForDraggedTypes([.fileURL])
+        clipTasks.onChange = { [weak self] in self?.clipTasksWindow?.refresh() }
         playerController.setMPVVideoView(mpvPlayerView)
         newTagField.delegate = self
         playerController.onItemChanged = { [weak self] in
@@ -580,6 +605,9 @@ final class PlayerView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSCo
         }
         playerController.onPlaybackStateChanged = { [weak self] in
             self?.updatePlaybackState()
+        }
+        playerController.onPlaybackSpeedChanged = { [weak self] in
+            self?.updatePlaybackSpeed()
         }
         playerController.onPlaybackModeChanged = { [weak self] in
             self?.updatePlaybackModeButton()

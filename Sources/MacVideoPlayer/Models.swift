@@ -5,6 +5,19 @@ enum SupportedVideoFormat {
     static var displayName: String { AppStrings.usesSimplifiedChinese ? "MP4、MOV、M4V 和 MKV" : "MP4, MOV, M4V, and MKV" }
 }
 
+enum PlaybackSpeed {
+    static let values: [Double] = [0.5, 1, 1.5, 2]
+
+    static func stepped(from current: Double, by direction: Int) -> Double {
+        guard let index = values.firstIndex(of: current) else { return 1 }
+        return values[min(max(index + direction, 0), values.count - 1)]
+    }
+
+    static func label(_ speed: Double) -> String {
+        "\(speed.formatted(.number.precision(.fractionLength(0...1))))×"
+    }
+}
+
 enum PlaybackMode {
     case sequential
     case shuffle

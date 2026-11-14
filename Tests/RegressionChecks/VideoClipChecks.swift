@@ -9,6 +9,7 @@ private struct ClipFixtureOutput: Decodable {
 
 extension RegressionChecks {
     static func checkVideoClips(_ root: URL) async throws {
+        try await checkClipExportTasks(root)
         checkScreenshotSettings(root)
         try checkClipTrimSelection(root)
         try checkBundledClipEncoder(root)
@@ -61,15 +62,26 @@ extension RegressionChecks {
 
         let slowSource = directory.appendingPathComponent("slow.mp4")
         try original.write(to: slowSource)
-        let task = Task { try await exporter.export(source: slowSource, range: range, destination: destination) }
+        var progressValues: [Double] = []
+        let task = Task { try await exporter.export(source: slowSource, range: range, destination: destination) { progressValues.append($0) } }
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while !FileManager.default.fileExists(atPath: slowSource.deletingPathExtension().appendingPathExtension("started").path) {
             guard ContinuousClock.now < deadline else { fatalError("Fake encoder did not start") }
             try await Task.sleep(for: .milliseconds(10))
         }
+        while !progressValues.contains(0.5) {
+            guard ContinuousClock.now < deadline else { fatalError("Export progress was not delivered") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
         exporter.cancel()
         do { try await task.value; fatalError("Cancelled exports must not succeed") }
         catch is CancellationError {}
+        expect(progressValues.first == 0 && !progressValues.contains(1),
+               "Cancelled export must report progress without claiming completion")
+        expect(VideoClipExporter.progressFraction(line: "out_time_us=999999999", duration: 2.5) == 0.99,
+               "Encoder progress must remain below completion until publication")
+        expect(VideoClipExporter.progressFraction(line: "out_time_us=N/A", duration: 2.5) == nil,
+               "Invalid encoder progress must be ignored")
         let afterCancellation = try Data(contentsOf: destination)
         expect(afterCancellation == preservedDestination && !exporter.isExporting,
                "Cancellation must leave the previous destination intact and allow retrying")
@@ -90,7 +102,10 @@ extension RegressionChecks {
         let afterEmptyOutput = try Data(contentsOf: destination)
         expect(afterEmptyOutput == preservedDestination, "Empty output must not replace an existing clip")
 
-        try await exporter.export(source: source, range: range, destination: destination)
+        var completedProgress: [Double] = []
+        try await exporter.export(source: source, range: range, destination: destination) { completedProgress.append($0) }
+        expect(completedProgress.first == 0 && completedProgress.last == 1,
+               "Successful publication must report completion")
         let afterRetry = try JSONDecoder().decode(ClipFixtureOutput.self, from: Data(contentsOf: destination))
         expect(afterRetry.start == range.start, "An export must be retryable after failure or cancellation")
         let sourceBytes = try Data(contentsOf: source)
@@ -98,6 +113,43 @@ extension RegressionChecks {
         let remaining = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         expect(!remaining.contains { $0.hasPrefix(".clip-") }, "Exports must clean staging files and encoder logs")
         print("PASS: clip time entry, range bounds, MP4 commands, cancellation, source protection, atomic publication, and retry")
+    }
+
+    static func checkClipExportTasks(_ root: URL) async throws {
+        let directory = root.appendingPathComponent("task-queue", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let slow = directory.appendingPathComponent("slow.mp4")
+        let source = directory.appendingPathComponent("normal.mp4")
+        try Data("source".utf8).write(to: slow)
+        try Data("source".utf8).write(to: source)
+        let destination = directory.appendingPathComponent("one.mp4")
+        let second = directory.appendingPathComponent("two.mp4")
+        let range = try VideoClipRange(start: 1, end: 3.5, sourceDuration: 10)
+        let tool = root.appendingPathComponent("fake-ffmpeg")
+        let tasks = ClipExportTasks(makeExporter: { VideoClipExporter(ffmpegURL: tool) })
+        expect(tasks.enqueue(source: slow, range: range, destination: destination), "First task must start")
+        expect(tasks.enqueue(source: source, range: range, destination: second), "Second task must queue")
+        expect(!tasks.enqueue(source: source, range: range, destination: second), "Concurrent destination must be rejected")
+        expect(tasks.items[1].status == .queued, "Only one encoder may run at a time")
+        let firstID = tasks.items[0].id
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while tasks.items[0].progress < 0.5 {
+            guard ContinuousClock.now < deadline else { fatalError("Task progress did not update") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        tasks.cancel(firstID)
+        while tasks.hasActiveTasks {
+            guard ContinuousClock.now < deadline else { fatalError("Task queue did not finish") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        expect(tasks.items[0].status == .cancelled && tasks.items[1].status == .completed,
+               "Cancelling one task must allow the next task to finish")
+        expect(FileManager.default.fileExists(atPath: second.path), "Queued export must produce its destination")
+        expect(tasks.enqueue(source: slow, range: range, destination: destination), "Another task must be accepted")
+        await tasks.cancelAndWait()
+        expect(!tasks.hasActiveTasks && tasks.items.last?.status == .cancelled,
+               "Shutdown must cancel even a task not yet started")
+        print("PASS: background export queue, progress, destination conflicts, cancellation, and shutdown")
     }
 
     static func checkScreenshotSettings(_ root: URL) {

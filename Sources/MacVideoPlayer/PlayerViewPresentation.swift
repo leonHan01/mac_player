@@ -5,6 +5,9 @@ extension PlayerView {
     internal func applyLanguage() {
         titleLabel.stringValue = AppStrings.appName
         playlistTitleLabel.stringValue = AppStrings.playlist
+        playlistSearch.placeholderString = AppStrings.searchPlaylist
+        speedPopup.toolTip = AppStrings.playbackSpeed
+        speedPopup.setAccessibilityLabel(AppStrings.playbackSpeed)
         currentTagsLabel.stringValue = AppStrings.tags
         emptyHintLabel.stringValue = AppStrings.localFilesHint
 
@@ -120,6 +123,7 @@ extension PlayerView {
         playPauseButton.isEnabled = hasPlaylist && !isLoading
         nextButton.isEnabled = hasPlaylist && !isLoading && playerController.hasNext
         playbackModeButton.isEnabled = hasPlaylist && !isLoading
+        speedPopup.isEnabled = hasPlaylist && !isLoading
         sortModeButton.isEnabled = hasPlaylist && !isLoading
         screenshotButton.isEnabled = hasItem && !isLoading
         trimVideoButton.isEnabled = hasItem && !isLoading
@@ -151,10 +155,14 @@ extension PlayerView {
     }
 
     internal func updatePlaylist() {
-        let urls = playerController.playlistURLs
-        let count = urls.count
-        let selection = playerController.currentPlaylistIndex
-        let playlistChanged = renderedPlaylistRevision != playerController.playlistRevision
+        let query = playlistSearch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let playlistChanged = renderedPlaylistRevision != playerController.playlistRevision || renderedSearch != query
+        if playlistChanged {
+            visiblePlaylistURLs = PlaylistState.search(playerController.playlistURLs, query: query)
+            renderedSearch = query
+        }
+        let count = visiblePlaylistURLs.count
+        let selection = playerController.currentVideoURL.flatMap { visiblePlaylistURLs.firstIndex(of: $0) }
         let selectionChanged = selection != renderedPlaylistSelection
         playlistCountLabel.stringValue = AppStrings.playlistCount(count)
 
@@ -193,7 +201,7 @@ extension PlayerView {
         isSyncingPlaylistSelection = true
         defer { isSyncingPlaylistSelection = false }
 
-        guard let currentIndex = playerController.currentPlaylistIndex else {
+        guard let currentIndex = playerController.currentVideoURL.flatMap({ visiblePlaylistURLs.firstIndex(of: $0) }) else {
             playlistTableView.deselectAll(nil)
             return
         }
@@ -430,6 +438,12 @@ extension PlayerView {
             )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
             playbackModeButton.toolTip = AppStrings.shufflePlayback
             playbackModeButton.setAccessibilityLabel(AppStrings.shufflePlayback)
+        }
+    }
+
+    internal func updatePlaybackSpeed() {
+        if let index = PlaybackSpeed.values.firstIndex(of: playerController.playbackSpeed) {
+            speedPopup.selectItem(at: index)
         }
     }
 

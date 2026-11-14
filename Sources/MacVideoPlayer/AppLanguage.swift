@@ -76,6 +76,11 @@ enum AppStrings {
     static var sortByCreationTime: String { value("Sort by creation time, newest first", "按创建时间排序（最新优先）") }
     static var size: String { value("Size", "大小") }
     static var fileSizeUnavailable: String { value("Size unavailable", "无法读取大小") }
+    static var playbackSpeed: String { value("Playback speed", "播放速度") }
+    static var decreaseSpeed: String { value("Decrease Playback Speed", "降低播放速度") }
+    static var increaseSpeed: String { value("Increase Playback Speed", "提高播放速度") }
+    static var resetSpeed: String { value("Normal Playback Speed", "恢复正常速度") }
+    static var searchPlaylist: String { value("Search filenames", "搜索文件名") }
     static var sort: String { value("Sort", "排序") }
     static var currentVideo: String { value("Current video", "正在播放") }
 
@@ -114,6 +119,12 @@ enum AppStrings {
     static var trimVideo: String { value("Trim Video", "截取片段") }
     static var clipStart: String { value("Start", "起点") }
     static var clipEnd: String { value("End", "终点") }
+    static func clipExportProgress(_ percent: Int) -> String { value("Exporting \(percent)%", "导出进度 \(percent)%") }
+    static var clipTasks: String { value("Export Tasks", "导出任务") }
+    static var clipTasksEmpty: String { value("No export tasks", "暂无导出任务") }
+    static var clipTaskQueued: String { value("Waiting", "等待中") }
+    static var clipTaskCompleted: String { value("Completed", "已完成") }
+    static var clipTaskDuplicate: String { value("An export to this file is already queued or running.", "已有任务正在导出到此文件，请选择其他文件名。") }
     static var clipExportMP4: String { value("Export MP4…", "导出 MP4…") }
     static var clipInvalidRange: String { value("Enter a valid start and end within the video. The end must be later than the start.", "请输入视频范围内的有效起点和终点，终点必须晚于起点。") }
     static var clipSourceAsDestination: String { value("Choose a different filename. The source video cannot be replaced.", "请选择其他文件名，不能覆盖原视频。") }

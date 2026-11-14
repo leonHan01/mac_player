@@ -27,6 +27,11 @@ struct PlaylistState {
 
     func fileSize(for url: URL) -> Int64? { fileSizes[url] }
 
+    static func search(_ urls: [URL], query: String) -> [URL] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? urls : urls.filter { $0.lastPathComponent.localizedStandardContains(query) }
+    }
+
     var hasPrevious: Bool {
         switch playbackMode {
         case .sequential: urls.indices.contains(selectedIndex - 1)
