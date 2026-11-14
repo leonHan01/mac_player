@@ -243,7 +243,14 @@ extension RegressionChecks {
                              ("Episode 1.mp4", 20), ("中文 10.mov", 0), ("中文 2.mov", 0)] {
             try Data(repeating: 0, count: size).write(to: folder.appendingPathComponent(name))
         }
+        let older = folder.appendingPathComponent("Episode 1.mp4")
+        let newer = folder.appendingPathComponent("Episode 2.mp4")
+        try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: older.path)
+        try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: 2_000_000)], ofItemAtPath: newer.path)
         let result = try VideoFileScanner.buildLoadResult(for: folder, sortMode: .nameAscending)
+        let dates = result.playlistsBySortMode[.creationDateDescending]!
+        expect(dates.firstIndex(of: newer)! < dates.firstIndex(of: older)!,
+               "Creation time sorting must place newer files first")
         for mode in SortMode.allCases {
             let expected = try VideoFileScanner.sorted(
                 Array(result.urls.reversed()), sortMode: mode, fileSizes: result.fileSizes

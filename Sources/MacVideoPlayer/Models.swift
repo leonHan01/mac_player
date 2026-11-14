@@ -13,6 +13,7 @@ enum PlaybackMode {
 enum SortMode: Sendable, Hashable, CaseIterable {
     case nameAscending
     case sizeDescending
+    case creationDateDescending
 }
 
 enum OpenVideoError: LocalizedError {

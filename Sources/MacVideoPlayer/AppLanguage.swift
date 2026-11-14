@@ -72,6 +72,8 @@ enum AppStrings {
     static var filterAll: String { value("Filter: All", "筛选：全部") }
     static var noTags: String { value("No tags", "暂无标签") }
     static var name: String { value("Name", "名称") }
+    static var creationTime: String { value("Created", "创建时间") }
+    static var sortByCreationTime: String { value("Sort by creation time, newest first", "按创建时间排序（最新优先）") }
     static var size: String { value("Size", "大小") }
     static var fileSizeUnavailable: String { value("Size unavailable", "无法读取大小") }
     static var sort: String { value("Sort", "排序") }
@@ -212,7 +214,7 @@ enum AppStrings {
     static var menuPlayPause: String { value("Play/Pause", "播放/暂停") }
     static var menuCaptureScreenshot: String { value("Capture Screenshot", "截取画面") }
     static var menuToggleShuffle: String { value("Toggle Shuffle", "切换随机播放") }
-    static var menuToggleSizeSort: String { value("Toggle Size Sort", "切换大小排序") }
+    static var menuToggleSizeSort: String { value("Change Sort Order", "切换排序方式") }
     static var menuEditTags: String { value("Edit Tags...", "编辑标签…") }
     static var menuRevealInFinder: String { value("Reveal in Finder", "在 Finder 中显示") }
     static var menuDeleteCurrent: String { value("Delete Current Video", "删除当前视频") }

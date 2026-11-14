@@ -443,6 +443,10 @@ extension PlayerView {
             sortModeButton.title = AppStrings.size
             setButtonTitleColor(sortModeButton, color: AppTheme.text)
             sortModeButton.toolTip = AppStrings.sortBySize
+        case .creationDateDescending:
+            sortModeButton.title = AppStrings.creationTime
+            setButtonTitleColor(sortModeButton, color: AppTheme.text)
+            sortModeButton.toolTip = AppStrings.sortByCreationTime
         }
     }
 

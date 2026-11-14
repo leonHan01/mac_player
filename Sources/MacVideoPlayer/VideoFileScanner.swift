@@ -14,6 +14,7 @@ struct PlaylistLoadResult: Sendable {
 private struct VideoFileScan {
     let urls: [URL]
     let fileSizes: [URL: Int64]
+    let creationDates: [URL: Date]
 }
 
 enum VideoFileScanner {
@@ -26,7 +27,7 @@ enum VideoFileScanner {
         return PlaylistLoadResult(
             requestedURL: url, startURL: url, startsAtFirstVideo: false,
             fileSizes: [url: fileSize(url)],
-            playlistsBySortMode: [.nameAscending: [url], .sizeDescending: [url]],
+            playlistsBySortMode: Dictionary(uniqueKeysWithValues: SortMode.allCases.map { ($0, [url]) }),
             sortMode: sortMode
         )
     }
@@ -50,17 +51,19 @@ enum VideoFileScanner {
         let scan = try videoFiles(in: directoryURL, checkCancellation: checkCancellation)
         var videoURLs = scan.urls
         var fileSizes = scan.fileSizes
+        var creationDates = scan.creationDates
 
         if !isFolder, !videoURLs.contains(where: { isSameFile($0, url) }) {
             videoURLs.append(url)
             fileSizes[url] = fileSize(url)
+            creationDates[url] = creationDate(url)
         }
 
         guard !videoURLs.isEmpty else {
             throw OpenVideoError.noPlayableFiles(directoryURL.lastPathComponent)
         }
 
-        // There are only two orders. Prepare both on the scan worker so a
+        // Prepare all orders on the scan worker so a
         // sort change (including one during loading) never sorts on the UI thread.
         let nameOrder = try sorted(videoURLs, sortMode: .nameAscending, checkCancellation: checkCancellation)
         // Reuse the natural-name rank to break size ties. Localized string
@@ -73,8 +76,21 @@ enum VideoFileScanner {
             try checkCancellation()
             return first.size == second.size ? first.rank < second.rank : first.size > second.size
         }.map(\.url)
+        let dateEntries = try nameOrder.enumerated().map { index, url in
+            try checkCancellation()
+            return (url: url, rank: index, date: creationDates[url])
+        }
+        let dateOrder = try dateEntries.sorted { first, second in
+            try checkCancellation()
+            switch (first.date, second.date) {
+            case let (a?, b?) where a != b: return a > b
+            case (nil, _?): return false
+            case (_?, nil): return true
+            default: return first.rank < second.rank
+            }
+        }.map(\.url)
         let playlistsBySortMode: [SortMode: [URL]] = [
-            .nameAscending: nameOrder, .sizeDescending: sizeOrder
+            .nameAscending: nameOrder, .sizeDescending: sizeOrder, .creationDateDescending: dateOrder
         ]
         try checkCancellation()
         guard let first = playlistsBySortMode[sortMode]?.first else {
@@ -107,6 +123,19 @@ enum VideoFileScanner {
             return try entries.sorted { first, second in
                 try checkCancellation()
                 return first.name.localizedStandardCompare(second.name) == .orderedAscending
+            }.map(\.url)
+        case .creationDateDescending:
+            return try entries.map { entry in
+                try checkCancellation()
+                return (url: entry.url, name: entry.name, date: creationDate(entry.url))
+            }.sorted { first, second in
+                try checkCancellation()
+                switch (first.date, second.date) {
+                case let (a?, b?) where a != b: return a > b
+                case (nil, _?): return false
+                case (_?, nil): return true
+                default: return first.name.localizedStandardCompare(second.name) == .orderedAscending
+                }
             }.map(\.url)
         case .sizeDescending:
             return try entries
@@ -157,7 +186,7 @@ enum VideoFileScanner {
         var scanError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: directoryURL,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey, .creationDateKey],
             options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants],
             errorHandler: { _, error in
                 scanError = error
@@ -167,16 +196,18 @@ enum VideoFileScanner {
 
         var urls: [URL] = []
         var fileSizes: [URL: Int64] = [:]
+        var creationDates: [URL: Date] = [:]
         while true {
             try checkCancellation()
             guard let url = enumerator.nextObject() as? URL else { break }
             if let candidate = playableFileCandidate(url) {
                 urls.append(candidate.url)
                 fileSizes[candidate.url] = candidate.fileSize
+                creationDates[candidate.url] = candidate.creationDate
             }
         }
         if let scanError { throw scanError }
-        return VideoFileScan(urls: urls, fileSizes: fileSizes)
+        return VideoFileScan(urls: urls, fileSizes: fileSizes, creationDates: creationDates)
     }
 
     private static func isDirectory(_ url: URL) throws -> Bool {
@@ -188,22 +219,26 @@ enum VideoFileScanner {
         return values.isDirectory == true
     }
 
-    private static func playableFileCandidate(_ url: URL) -> (url: URL, fileSize: Int64)? {
+    private static func playableFileCandidate(_ url: URL) -> (url: URL, fileSize: Int64, creationDate: Date?)? {
         guard isSupportedVideoFile(url) else { return nil }
 
         let values = try? url.resourceValues(
-            forKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey]
+            forKeys: [.isRegularFileKey, .fileSizeKey, .totalFileAllocatedSizeKey, .creationDateKey]
         )
         guard values?.isRegularFile == true, FileManager.default.isReadableFile(atPath: url.path) else {
             return nil
         }
 
         let fileSize = Int64(values?.fileSize ?? values?.totalFileAllocatedSize ?? 0)
-        return (url, fileSize)
+        return (url, fileSize, values?.creationDate)
     }
 
     private static func isSupportedVideoFile(_ url: URL) -> Bool {
         SupportedVideoFormat.fileExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private static func creationDate(_ url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate
     }
 
     private static func fileSize(_ url: URL) -> Int64 {

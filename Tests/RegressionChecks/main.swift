@@ -503,6 +503,7 @@ struct RegressionChecks {
         expect(controller.playlistURLs == [large, small], "A completed scan must apply the latest sort selection")
         expect(controller.currentVideoURL == large, "Folder loading must start at the first video in the latest order")
         controller.toggleSortMode(tagStore: tags)
+        controller.toggleSortMode(tagStore: tags)
         await load(controller, small) { controller.toggleSortMode(tagStore: tags) }
         expect(controller.playlistURLs == [large, small] && controller.currentVideoURL == small, "An explicit file selection must be preserved when sorting changes")
     }

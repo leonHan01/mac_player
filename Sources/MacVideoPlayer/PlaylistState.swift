@@ -119,7 +119,8 @@ struct PlaylistState {
     }
 
     mutating func toggleSortMode(matchingTag: (URL, String) -> Bool) throws -> RebuiltSelection? {
-        let nextSortMode: SortMode = sortMode == .nameAscending ? .sizeDescending : .nameAscending
+        let modes = SortMode.allCases
+        let nextSortMode = modes[(modes.firstIndex(of: sortMode)! + 1) % modes.count]
         guard !urls.isEmpty else {
             sortMode = nextSortMode
             return nil

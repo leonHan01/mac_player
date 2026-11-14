@@ -17,7 +17,7 @@ private struct PlaylistFixture {
             startURL: startURL ?? urls[0],
             startsAtFirstVideo: startURL == nil,
             fileSizes: [:],
-            playlistsBySortMode: [.nameAscending: urls, .sizeDescending: Array(urls.reversed())],
+            playlistsBySortMode: [.nameAscending: urls, .sizeDescending: Array(urls.reversed()), .creationDateDescending: urls],
             sortMode: .nameAscending
         )
     }
@@ -51,6 +51,7 @@ extension RegressionChecks {
         let survivingSelection = try state.load(fixture.result(), excluding: removedPaths)
         expect(survivingSelection == files[1] && state.urls == [files[1], files[0]],
                "Deletions made during scanning must be excluded before choosing the folder's first file")
+        _ = try state.toggleSortMode { _, _ in true }
         let sortedSelection = try state.toggleSortMode { _, _ in true }
         expect(state.urls == [files[0], files[1]] && sortedSelection?.retainedCurrentVideo == true,
                "Every cached sort must exclude deleted files and retain the current video")
